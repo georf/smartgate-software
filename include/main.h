@@ -1,0 +1,56 @@
+#include <Arduino.h>
+#include <MCP3XXX.h>
+#include <AdcSwitch.h>
+#include <Switch.h>
+#include <ShiftOutput.h>
+#include <Motor.h>
+#include <EEPROM.h>
+#include <ESP8266WiFi.h>
+#include <PubSubClient.h>
+#include <credentials.h>
+
+#define CLOCK_PIN D5
+#define MOSI_PIN D7
+#define MISO_PIN D6
+#define CS_ADC_PIN D0
+#define CS_SHIFT_PIN D8
+
+#define MOTOR0_0 D2
+#define MOTOR0_1 D1
+#define MOTOR0_SPEED_CHANNEL 0
+#define MOTOR1_0 D4
+#define MOTOR1_1 D3
+#define MOTOR1_SPEED_CHANNEL 1
+
+#define MILLIS_BETWEEN_TOGGLE 1000
+
+#define SHIFT_PIN_LED_LEARN 4
+#define SHIFT_PIN_LED_ERROR 5
+#define SHIFT_PIN_LED_0 6
+#define SHIFT_PIN_LED_1 7
+
+// toggle gate state from button, radio or wifi
+void toggleGateState();
+
+// press for learning mode
+void learnPressed();
+
+// not connected
+void btn2Callback();
+void btn3Callback();
+
+// if a motor has an error
+void errorCallback();
+
+
+// MQTT stuff
+#define MQTT_ID "smartgate"
+#define MQTT_STATUS_UPDATE_TIME 6 * 1000 // Every minute
+#define MQTT_SMARTGATE_CHANNEL "adebar/smartgate/state"
+#define MQTT_SMARTGATE_TOGGLE "adebar/smartgate/toggle"
+#define MQTT_SMARTGATE_OPEN "adebar/smartgate/open"
+#define MQTT_SMARTGATE_CLOSE "adebar/smartgate/close"
+
+void mqtt_reconnect();
+void mqtt_callback(char *topic, byte *payload, unsigned int length);
+void mqtt_send_status();
