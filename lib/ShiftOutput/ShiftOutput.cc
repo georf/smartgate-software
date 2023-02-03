@@ -2,7 +2,7 @@
 
 void ShiftOutput::begin(uint8_t data_pin, uint8_t load_pin, uint8_t clock_pin)
 {
-    dataState = 0;
+    dataState = 0b00001111; // relais output is inverted
 
     _data_pin = data_pin;
     _load_pin = load_pin;
@@ -45,6 +45,5 @@ void ShiftOutput::digitalWrite(uint8_t pin, uint8_t newValue)
 
 uint8_t ShiftOutput::digitalRead(uint8_t pin)
 {
-    pin = pin + 1;
     return bitRead(dataState, pin);
 }

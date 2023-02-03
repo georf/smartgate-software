@@ -8,10 +8,14 @@ Motor motor1;            // motor 1 handler
 // gate states
 motor_target_or_state target = close;
 motor_target_or_state lastTarget = close;
+motor_target_or_state wantedTarget = close;
 motor_target_or_state state = stop;
 
-unsigned long lastToggle = 0; // last toggle millis
-uint8_t learnMode = 0;        // hold the learning mode state
+unsigned long lastToggle = 0;             // last toggle millis
+unsigned long powerSupplyActivatedAt = 0; // 24v power supply activated
+unsigned long powerSupplyShutdownAt = 0;  // 24v power supply shutdown time
+uint8_t learnMode = 0;                    // hold the learning mode state
+uint8_t loopCount = 0;
 
 AdcSwitch btn0(&adc, 7, 600, LOW); // btn on board
 AdcSwitch btn1(&adc, 2, 600, LOW); // btn0 connected to box button
@@ -35,6 +39,9 @@ void setup()
   // initialize adc and shift register
   adc.begin(CS_ADC_PIN, MOSI_PIN, MISO_PIN, CLOCK_PIN);
   shiftOutput.begin(MOSI_PIN, CS_SHIFT_PIN, CLOCK_PIN);
+
+  // enable ERROR LED
+  shiftOutput.digitalWrite(SHIFT_PIN_LED_ERROR, HIGH);
 
   // load last settings from EEPROM and initialize motors
   MotorSetting setting0, setting1;
@@ -70,15 +77,19 @@ void setup()
 
   client.setServer(mqttServer, mqttPort);
   client.setCallback(mqtt_callback);
+
+  // disable ERROR LED
+  shiftOutput.digitalWrite(SHIFT_PIN_LED_ERROR, LOW);
 }
 
 void loop()
 {
-  Serial.println(WiFi.status());
+  loopCount++;
   unsigned long currentMillis = millis();
-  // if (!client.connected())
-  //   mqtt_reconnect();
-  // client.loop();
+
+  if (!client.connected())
+    mqtt_reconnect();
+  client.loop();
 
   if ((lastMqttStatusUpdate + MQTT_STATUS_UPDATE_TIME) < currentMillis)
     mqtt_send_status();
@@ -88,11 +99,42 @@ void loop()
   motor1.handle(currentMillis);
 
   // handle button changes
-  btn0.read(currentMillis);
-  btn1.read(currentMillis);
-  btn2.read(currentMillis);
-  btn3.read(currentMillis);
-  radio.read(currentMillis);
+  // but not every loop
+  // see: https://arduino.stackexchange.com/questions/19787/esp8266-analog-read-interferes-with-wifi
+  if (loopCount % 15 == 0)
+    btn0.read(currentMillis);
+  if (loopCount % 15 == 1)
+    btn1.read(currentMillis);
+  if (loopCount % 15 == 2)
+    btn2.read(currentMillis);
+  if (loopCount % 15 == 3)
+    btn3.read(currentMillis);
+  if (loopCount % 15 == 4)
+    radio.read(currentMillis);
+  if (loopCount % 15 == 5 && powerSupplyShutdownAt != 0 && powerSupplyShutdownAt < currentMillis)
+  {
+    shiftOutput.digitalWrite(SHIFT_PIN_RELAY_4_POWER_SUPPLY, HIGH);
+    powerSupplyShutdownAt = 0;
+  }
+
+  if (wantedTarget != target)
+  {
+    if (wantedTarget == open || wantedTarget == close)
+    {
+      if (shiftOutput.digitalRead(SHIFT_PIN_RELAY_4_POWER_SUPPLY))
+      {
+        shiftOutput.digitalWrite(SHIFT_PIN_RELAY_4_POWER_SUPPLY, LOW);
+        powerSupplyActivatedAt = currentMillis + MILLIS_AFTER_POWER_SUPPLY_ACTIVATED;
+      }
+      else if (powerSupplyActivatedAt < currentMillis)
+        motor0.target = motor1.target = target = wantedTarget;
+    }
+    else if (wantedTarget == stop)
+    {
+      motor0.target = motor1.target = target = wantedTarget;
+      powerSupplyShutdownAt = currentMillis + MILLIS_POWER_SUPPLY_SHUTDOWN_TIME;
+    }
+  }
 
   if (target != state)
   {
@@ -128,39 +170,43 @@ void loop()
   }
 
   // show warning led while moving
-  if (state == opening || state == closing)
+  if (loopCount % 15 == 10)
   {
-    if (currentMillis / 100 % 2 == 0)
-    {
-      shiftOutput.digitalSet(SHIFT_PIN_LED_0, HIGH);
-      shiftOutput.digitalSet(SHIFT_PIN_LED_1, LOW);
-      shiftOutput.write();
-    }
-    else
-    {
-      shiftOutput.digitalSet(SHIFT_PIN_LED_0, LOW);
-      shiftOutput.digitalSet(SHIFT_PIN_LED_1, HIGH);
-      shiftOutput.write();
-    }
-  }
 
-  // show warning led while learning
-  if (learnMode != 0)
-  {
-    if (currentMillis / 100 % 2 == 0)
+    if (wantedTarget != target || state == opening || state == closing)
     {
-
-      shiftOutput.digitalSet(SHIFT_PIN_LED_LEARN, HIGH);
-      shiftOutput.digitalSet(SHIFT_PIN_LED_0, HIGH);
-      shiftOutput.digitalSet(SHIFT_PIN_LED_1, LOW);
-      shiftOutput.write();
+      if (currentMillis / 100 % 2 == 0)
+      {
+        shiftOutput.digitalSet(SHIFT_PIN_LED_0, HIGH);
+        shiftOutput.digitalSet(SHIFT_PIN_LED_1, LOW);
+        shiftOutput.write();
+      }
+      else
+      {
+        shiftOutput.digitalSet(SHIFT_PIN_LED_0, LOW);
+        shiftOutput.digitalSet(SHIFT_PIN_LED_1, HIGH);
+        shiftOutput.write();
+      }
     }
-    else
+
+    // show warning led while learning
+    if (learnMode != 0)
     {
-      shiftOutput.digitalSet(SHIFT_PIN_LED_LEARN, LOW);
-      shiftOutput.digitalSet(SHIFT_PIN_LED_0, LOW);
-      shiftOutput.digitalSet(SHIFT_PIN_LED_1, HIGH);
-      shiftOutput.write();
+      if (currentMillis / 100 % 2 == 0)
+      {
+
+        shiftOutput.digitalSet(SHIFT_PIN_LED_LEARN, HIGH);
+        shiftOutput.digitalSet(SHIFT_PIN_LED_0, HIGH);
+        shiftOutput.digitalSet(SHIFT_PIN_LED_1, LOW);
+        shiftOutput.write();
+      }
+      else
+      {
+        shiftOutput.digitalSet(SHIFT_PIN_LED_LEARN, LOW);
+        shiftOutput.digitalSet(SHIFT_PIN_LED_0, LOW);
+        shiftOutput.digitalSet(SHIFT_PIN_LED_1, HIGH);
+        shiftOutput.write();
+      }
     }
   }
 }
@@ -174,18 +220,15 @@ void toggleGateState()
   lastToggle = currentMillis;
 
   if (state == open)
-    lastTarget = target = close;
+    lastTarget = wantedTarget = close;
   else if (state == close)
-    lastTarget = target = open;
+    lastTarget = wantedTarget = open;
   else if (state == opening || state == closing)
-    target = stop;
+    wantedTarget = stop;
   else if (state == stop && lastTarget == close)
-    lastTarget = target = open;
+    lastTarget = wantedTarget = open;
   else if (state == stop && lastTarget == open)
-    lastTarget = target = close;
-
-  motor0.target = target;
-  motor1.target = target;
+    lastTarget = wantedTarget = close;
 }
 
 void learnPressed()
@@ -194,7 +237,8 @@ void learnPressed()
   if (learnMode == 0)
   {
     Serial.println("LEARN MODE");
-    btn0.pressTimeMillis = 50;
+    btn0.pressTimeMillis = 50;                                     // normal press time
+    shiftOutput.digitalWrite(SHIFT_PIN_RELAY_4_POWER_SUPPLY, LOW); // enable power supply
     learnMode = 1;
   }
   else if (learnMode == 1)
@@ -261,8 +305,12 @@ void learnPressed()
     EEPROM.put(128, motor1.setting);
     EEPROM.commit();
 
-    btn0.pressTimeMillis = 3000;
-    shiftOutput.digitalWrite(SHIFT_PIN_LED_LEARN, LOW);
+    btn0.pressTimeMillis = 3000; // long press time
+    shiftOutput.digitalSet(SHIFT_PIN_LED_LEARN, LOW);
+    shiftOutput.digitalSet(SHIFT_PIN_LED_0, LOW);
+    shiftOutput.digitalSet(SHIFT_PIN_LED_1, LOW);
+    shiftOutput.write();
+    powerSupplyShutdownAt = currentMillis + MILLIS_POWER_SUPPLY_SHUTDOWN_TIME; // disable power supply
     learnMode = 0;
   }
 }
@@ -282,20 +330,17 @@ void errorCallback()
     return learnPressed();
 
   // If it's the second error, we will stop.
-  if (lastTarget != target)
-    target = stop;
+  if (lastTarget != wantedTarget)
+    wantedTarget = stop;
   // If the old target was open, then close the gate.
-  else if (target == open)
-    target = close;
+  else if (wantedTarget == open)
+    wantedTarget = close;
   // If the old target was close, then open the gate.
-  else if (target == close)
-    target = open;
+  else if (wantedTarget == close)
+    wantedTarget = open;
   // Otherwise stop
   else
-    target = stop;
-
-  motor0.target = target;
-  motor1.target = target;
+    wantedTarget = stop;
 
   // enable error led
   shiftOutput.digitalWrite(SHIFT_PIN_LED_ERROR, HIGH);
@@ -331,31 +376,27 @@ void mqtt_callback(char *topic, byte *payload, unsigned int length)
     toggleGateState();
   else if (strcmp(topic, MQTT_SMARTGATE_OPEN) == 0)
   {
-    lastTarget = target = open;
-    motor0.target = target;
-    motor1.target = target;
+    lastTarget = wantedTarget = open;
   }
   else if (strcmp(topic, MQTT_SMARTGATE_CLOSE) == 0)
   {
-    lastTarget = target = close;
-    motor0.target = target;
-    motor1.target = target;
+    lastTarget = wantedTarget = close;
   }
 }
 
 void mqtt_send_status()
 {
-  if (target == close)
+  if (wantedTarget == close)
     client.publish(MQTT_SMARTGATE_CHANNEL, "closed");
-  else if (target == close)
+  else if (wantedTarget == close)
     client.publish(MQTT_SMARTGATE_CHANNEL, "opened");
-  else if (target == stop)
+  else if (wantedTarget == stop)
     client.publish(MQTT_SMARTGATE_CHANNEL, "stopped");
-  else if (target == opening)
+  else if (wantedTarget == opening)
     client.publish(MQTT_SMARTGATE_CHANNEL, "opening");
-  else if (target == closing)
+  else if (wantedTarget == closing)
     client.publish(MQTT_SMARTGATE_CHANNEL, "closing");
-  else if (target == unknown)
+  else if (wantedTarget == unknown)
     client.publish(MQTT_SMARTGATE_CHANNEL, "unknown");
 
   lastMqttStatusUpdate = millis();

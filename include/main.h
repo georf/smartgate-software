@@ -23,7 +23,13 @@
 #define MOTOR1_SPEED_CHANNEL 1
 
 #define MILLIS_BETWEEN_TOGGLE 1000
+#define MILLIS_AFTER_POWER_SUPPLY_ACTIVATED 1000
+#define MILLIS_POWER_SUPPLY_SHUTDOWN_TIME 1000
 
+#define SHIFT_PIN_RELAY_4_POWER_SUPPLY 0
+#define SHIFT_PIN_RELAY_3_NC 1
+#define SHIFT_PIN_RELAY_2_NC 2
+#define SHIFT_PIN_RELAY_1_NC 3
 #define SHIFT_PIN_LED_LEARN 4
 #define SHIFT_PIN_LED_ERROR 5
 #define SHIFT_PIN_LED_0 6
@@ -45,7 +51,7 @@ void errorCallback();
 
 // MQTT stuff
 #define MQTT_ID "smartgate"
-#define MQTT_STATUS_UPDATE_TIME 6 * 1000 // Every minute
+#define MQTT_STATUS_UPDATE_TIME 60 * 1000 // Every minute
 #define MQTT_SMARTGATE_CHANNEL "adebar/smartgate/state"
 #define MQTT_SMARTGATE_TOGGLE "adebar/smartgate/toggle"
 #define MQTT_SMARTGATE_OPEN "adebar/smartgate/open"
