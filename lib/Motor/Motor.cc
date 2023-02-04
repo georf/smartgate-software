@@ -94,8 +94,8 @@ void Motor::handle(unsigned long current_millis)
         }
     }
 
-    if (((state == opening || state == opening_soft) && setting.currentSteps < (setting.openAt + STEP_TOLERANCE)) ||
-        ((state == closing || state == closing_soft) && setting.currentSteps > (setting.closeAt - STEP_TOLERANCE)))
+    if (!_learn && (((state == opening || state == opening_soft) && setting.currentSteps < (setting.openAt + STEP_TOLERANCE)) ||
+                    ((state == closing || state == closing_soft) && setting.currentSteps > (setting.closeAt - STEP_TOLERANCE))))
     {
         Serial.println("Debug: stopping");
         target = stop;

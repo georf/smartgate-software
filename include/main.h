@@ -23,7 +23,7 @@
 #define MOTOR1_SPEED_CHANNEL 1
 
 #define MILLIS_BETWEEN_TOGGLE 1000
-#define MILLIS_AFTER_POWER_SUPPLY_ACTIVATED 1000
+#define MILLIS_AFTER_POWER_SUPPLY_ACTIVATED 800
 #define MILLIS_POWER_SUPPLY_SHUTDOWN_TIME 1000
 
 #define SHIFT_PIN_RELAY_4_POWER_SUPPLY 0
@@ -48,6 +48,7 @@ void btn3Callback();
 // if a motor has an error
 void errorCallback();
 
+void debugInfos();
 
 // MQTT stuff
 #define MQTT_ID "smartgate"

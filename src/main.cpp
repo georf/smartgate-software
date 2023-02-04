@@ -78,13 +78,15 @@ void setup()
   client.setServer(mqttServer, mqttPort);
   client.setCallback(mqtt_callback);
 
+  debugInfos();
+
   // disable ERROR LED
   shiftOutput.digitalWrite(SHIFT_PIN_LED_ERROR, LOW);
 }
-
 void loop()
 {
   loopCount++;
+  uint8_t loop15 = loopCount % 15;
   unsigned long currentMillis = millis();
 
   if (!client.connected())
@@ -101,20 +103,22 @@ void loop()
   // handle button changes
   // but not every loop
   // see: https://arduino.stackexchange.com/questions/19787/esp8266-analog-read-interferes-with-wifi
-  if (loopCount % 15 == 0)
+  if (loop15 == 0)
     btn0.read(currentMillis);
-  if (loopCount % 15 == 1)
+  else if (loop15 == 1)
     btn1.read(currentMillis);
-  if (loopCount % 15 == 2)
+  else if (loop15 == 2)
     btn2.read(currentMillis);
-  if (loopCount % 15 == 3)
+  else if (loop15 == 3)
     btn3.read(currentMillis);
-  if (loopCount % 15 == 4)
+  else if (loop15 == 4)
     radio.read(currentMillis);
-  if (loopCount % 15 == 5 && powerSupplyShutdownAt != 0 && powerSupplyShutdownAt < currentMillis)
+  else if (loop15 == 5 && powerSupplyShutdownAt != 0 && powerSupplyShutdownAt < currentMillis)
   {
     shiftOutput.digitalWrite(SHIFT_PIN_RELAY_4_POWER_SUPPLY, HIGH);
     powerSupplyShutdownAt = 0;
+    mqtt_send_status();
+    debugInfos();
   }
 
   if (wantedTarget != target)
@@ -127,7 +131,10 @@ void loop()
         powerSupplyActivatedAt = currentMillis + MILLIS_AFTER_POWER_SUPPLY_ACTIVATED;
       }
       else if (powerSupplyActivatedAt < currentMillis)
+      {
+        mqtt_send_status();
         motor0.target = motor1.target = target = wantedTarget;
+      }
     }
     else if (wantedTarget == stop)
     {
@@ -135,8 +142,7 @@ void loop()
       powerSupplyShutdownAt = currentMillis + MILLIS_POWER_SUPPLY_SHUTDOWN_TIME;
     }
   }
-
-  if (target != state)
+  else if (target != state)
   {
     if ((motor0.state == stop && motor1.state == stop) ||
         (motor0.state == open && motor1.state == open) ||
@@ -154,6 +160,8 @@ void loop()
         EEPROM.put(0, motor0.setting);
         EEPROM.put(128, motor1.setting);
         EEPROM.commit();
+
+        powerSupplyShutdownAt = currentMillis + MILLIS_POWER_SUPPLY_SHUTDOWN_TIME;
       }
 
       // disable warning leds
@@ -170,7 +178,7 @@ void loop()
   }
 
   // show warning led while moving
-  if (loopCount % 15 == 10)
+  if (loop15 == 10)
   {
 
     if (wantedTarget != target || state == opening || state == closing)
@@ -229,6 +237,8 @@ void toggleGateState()
     lastTarget = wantedTarget = open;
   else if (state == stop && lastTarget == open)
     lastTarget = wantedTarget = close;
+
+  mqtt_send_status();
 }
 
 void learnPressed()
@@ -239,6 +249,7 @@ void learnPressed()
     Serial.println("LEARN MODE");
     btn0.pressTimeMillis = 50;                                     // normal press time
     shiftOutput.digitalWrite(SHIFT_PIN_RELAY_4_POWER_SUPPLY, LOW); // enable power supply
+    powerSupplyShutdownAt = 0;
     learnMode = 1;
   }
   else if (learnMode == 1)
@@ -386,18 +397,43 @@ void mqtt_callback(char *topic, byte *payload, unsigned int length)
 
 void mqtt_send_status()
 {
-  if (wantedTarget == close)
-    client.publish(MQTT_SMARTGATE_CHANNEL, "closed");
-  else if (wantedTarget == close)
+  if (wantedTarget != target)
+  {
+
+    if (wantedTarget == close)
+      client.publish(MQTT_SMARTGATE_CHANNEL, "closing");
+    else if (wantedTarget == open)
+      client.publish(MQTT_SMARTGATE_CHANNEL, "opening");
+  }
+  else if (state == open)
     client.publish(MQTT_SMARTGATE_CHANNEL, "opened");
-  else if (wantedTarget == stop)
+  else if (state == close)
+    client.publish(MQTT_SMARTGATE_CHANNEL, "closed");
+  else if (state == stop)
     client.publish(MQTT_SMARTGATE_CHANNEL, "stopped");
-  else if (wantedTarget == opening)
+  else if (state == opening)
     client.publish(MQTT_SMARTGATE_CHANNEL, "opening");
-  else if (wantedTarget == closing)
+  else if (state == closing)
     client.publish(MQTT_SMARTGATE_CHANNEL, "closing");
-  else if (wantedTarget == unknown)
+  else if (state == unknown)
     client.publish(MQTT_SMARTGATE_CHANNEL, "unknown");
 
   lastMqttStatusUpdate = millis();
+}
+
+void debugInfos()
+{
+  Serial.print("Motor 0 openAt:");
+  Serial.println(motor0.setting.openAt);
+  Serial.print("Motor 0 closeAt:");
+  Serial.println(motor0.setting.closeAt);
+  Serial.print("Motor 0 currentSteps:");
+  Serial.println(motor0.setting.currentSteps);
+
+  Serial.print("Motor 1 openAt:");
+  Serial.println(motor1.setting.openAt);
+  Serial.print("Motor 1 closeAt:");
+  Serial.println(motor1.setting.closeAt);
+  Serial.print("Motor 1 currentSteps:");
+  Serial.println(motor1.setting.currentSteps);
 }

@@ -4,14 +4,14 @@
 
 enum motor_target_or_state
 {
-    open,
-    opening,
-    opening_soft,
-    close,
-    closing,
-    closing_soft,
-    stop,
-    unknown,
+    open = 1,
+    opening = 2,
+    opening_soft = 3,
+    close = 4,
+    closing = 5,
+    closing_soft = 6,
+    stop = 7,
+    unknown = 8,
 };
 
 typedef struct
@@ -25,11 +25,11 @@ typedef struct
 #define STEP_TOLERANCE 10
 #define STEP_END_SOFTING 200
 #define STEP_START_SOFTING 100
-#define STEP_THRESHOLD 950
+#define STEP_THRESHOLD 1000
 #define SPEED_FULL 255
-#define SPEED_FULL_MILLIS_LAST3 24
+#define SPEED_FULL_MILLIS_LAST3 100
 #define SPEED_SOFT 100
-#define SPEED_SOFT_MILLIS_LAST3 55
+#define SPEED_SOFT_MILLIS_LAST3 100
 #define SPEED_STOP 0
 
 class Motor
