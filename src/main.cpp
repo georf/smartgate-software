@@ -97,8 +97,8 @@ void loop()
     mqtt_reconnect();
   client.loop();
 
-  if ((lastMqttStatusUpdate + MQTT_STATUS_UPDATE_TIME) < currentMillis)
-    mqtt_send_status();
+  if ((lastMqttStatusUpdate + 10 * 60 * 1000) < currentMillis)
+    mqtt_send_status(true);
 
   // handle changes at both motors
   motor0.handle(currentMillis);
@@ -121,7 +121,7 @@ void loop()
   {
     shiftOutput.digitalWrite(SHIFT_PIN_RELAY_4_POWER_SUPPLY, HIGH);
     powerSupplyShutdownAt = 0;
-    mqtt_send_status();
+    mqtt_send_adebar_carport_gate(false);
     debugInfos();
   }
 
@@ -136,7 +136,7 @@ void loop()
       }
       else if (powerSupplyActivatedAt < currentMillis)
       {
-        mqtt_send_status();
+        mqtt_send_adebar_carport_gate(false);
         motor0.target = motor1.target = target = wantedTarget;
       }
     }
@@ -173,7 +173,7 @@ void loop()
       shiftOutput.digitalSet(SHIFT_PIN_LED_1, LOW);
       shiftOutput.write();
 
-      mqtt_send_status();
+      mqtt_send_adebar_carport_gate(false);
     }
     else if (motor0.state == closing || motor0.state == closing_soft || motor1.state == closing || motor1.state == closing_soft)
       state = closing;
@@ -242,7 +242,7 @@ void toggleGateState()
   else if (state == stop && lastTarget == open)
     lastTarget = wantedTarget = close;
 
-  mqtt_send_status();
+  mqtt_send_adebar_carport_gate(false);
 }
 
 void learnPressed()
@@ -363,66 +363,121 @@ void errorCallback()
 
 void mqtt_reconnect()
 {
-  Serial.println(WiFi.status());
+  // Serial.println(WiFi.status());
   if (!client.connected())
   {
     Serial.println("Reconnecting MQTT...");
 
-    if (!client.connect(MQTT_ID, mqttUser, mqttPassword))
+    if (!client.connect("adebar_carport", mqttUser, mqttPassword))
     {
       Serial.print("failed, rc=");
       Serial.println(client.state());
     }
     else
     {
-      client.subscribe(MQTT_SMARTGATE_TOGGLE);
-      client.subscribe(MQTT_SMARTGATE_OPEN);
-      client.subscribe(MQTT_SMARTGATE_CLOSE);
+      client.subscribe("adebar/carport/+/set");
       Serial.println("MQTT Connected...");
+      client.publish("adebar/carport/system/state", "connected");
+      mqtt_send_status(true);
     }
   }
 }
 
 void mqtt_callback(char *topic, byte *payload, unsigned int length)
 {
-  Serial.print("MQTT: receive ");
-  Serial.println(topic);
-  if (strcmp(topic, MQTT_SMARTGATE_TOGGLE) == 0)
-    toggleGateState();
-  else if (strcmp(topic, MQTT_SMARTGATE_OPEN) == 0)
+  if (!strcmp(topic, "adebar/carport/gate/set"))
   {
-    lastTarget = wantedTarget = open;
+    if (!strncmp((char *)payload, "STOP", length) && (wantedTarget != target || state == opening || state == closing))
+      wantedTarget = stop;
+    else if (!strncmp((char *)payload, "CLOSE", length))
+      lastTarget = wantedTarget = close;
+    else if (!strncmp((char *)payload, "OPEN", length))
+      lastTarget = wantedTarget = open;
+    return;
   }
-  else if (strcmp(topic, MQTT_SMARTGATE_CLOSE) == 0)
+  if (!strcmp(topic, "adebar/carport/system/set"))
   {
-    lastTarget = wantedTarget = close;
+    if (!strncmp((char *)payload, "RESTART", length)) {
+      ESP.restart();
+    }
+    return;
   }
 }
 
-void mqtt_send_status()
+void mqtt_send_status(boolean full)
 {
-  if (wantedTarget != target)
-  {
-
-    if (wantedTarget == close)
-      client.publish(MQTT_SMARTGATE_CHANNEL, "closing");
-    else if (wantedTarget == open)
-      client.publish(MQTT_SMARTGATE_CHANNEL, "opening");
-  }
-  else if (state == open)
-    client.publish(MQTT_SMARTGATE_CHANNEL, "opened");
-  else if (state == close)
-    client.publish(MQTT_SMARTGATE_CHANNEL, "closed");
-  else if (state == stop)
-    client.publish(MQTT_SMARTGATE_CHANNEL, "stopped");
-  else if (state == opening)
-    client.publish(MQTT_SMARTGATE_CHANNEL, "opening");
-  else if (state == closing)
-    client.publish(MQTT_SMARTGATE_CHANNEL, "closing");
-  else if (state == unknown)
-    client.publish(MQTT_SMARTGATE_CHANNEL, "unknown");
+  mqtt_send_adebar_carport_gate(full);
+  mqtt_send_adebar_carport_ip_address(full);
 
   lastMqttStatusUpdate = millis();
+}
+
+void mqtt_send_adebar_carport_gate(boolean full)
+{
+  if (full)
+  {
+    // see https://www.home-assistant.io/integrations/cover.mqtt/
+    JsonDocument discoveryConfig;
+    discoveryConfig["name"] = "Hoftor";
+    discoveryConfig["dev_cla"] = "gate";
+    discoveryConfig["cmd_t"] = "adebar/carport/gate/set";
+    discoveryConfig["stat_t"] = "adebar/carport/gate/state";
+    discoveryConfig["uniq_id"] = "adebar_carport_gate";
+
+    JsonObject device = discoveryConfig["dev"].to<JsonObject>();
+    device["identifiers"][0] = "adebar_carport";
+    device["name"] = "Carport";
+
+    char buffer[256];
+    serializeJson(discoveryConfig, buffer);
+    client.publish("homeassistant/cover/adebar_carport_gate/config", buffer);
+  }
+
+  if (wantedTarget != target)
+  {
+    if (wantedTarget == close)
+      client.publish("adebar/carport/gate/state", "closing");
+    else if (wantedTarget == open)
+      client.publish("adebar/carport/gate/state", "opening");
+  }
+  else if (state == open)
+    client.publish("adebar/carport/gate/state", "open");
+  else if (state == close)
+    client.publish("adebar/carport/gate/state", "closed");
+  else if (state == stop)
+    client.publish("adebar/carport/gate/state", "stopped");
+  else if (state == opening)
+    client.publish("adebar/carport/gate/state", "opening");
+  else if (state == closing)
+    client.publish("adebar/carport/gate/state", "closing");
+  else if (state == unknown)
+    client.publish("adebar/carport/gate/state", "unknown");
+}
+
+void mqtt_send_adebar_carport_ip_address(boolean full)
+{
+  if (full)
+  {
+    // see https://www.home-assistant.io/integrations/sensor.mqtt/
+    JsonDocument discoveryConfig;
+    discoveryConfig["name"] = "Carport IP-Adresse";
+    discoveryConfig["stat_t"] = "adebar/carport/ip_address/state";
+    discoveryConfig["uniq_id"] = "adebar_carport_ip_address";
+
+    JsonObject device = discoveryConfig["dev"].to<JsonObject>();
+    device["identifiers"][0] = "adebar_carport";
+    device["name"] = "Carport";
+
+    char buffer[256];
+    serializeJson(discoveryConfig, buffer);
+    client.publish("homeassistant/sensor/adebar_carport_ip_address/config", buffer);
+  }
+
+  String ip = WiFi.localIP().toString();
+  char ip_char[ip.length() + 1];
+  ip.toCharArray(ip_char, ip.length() + 1);
+
+  client.publish("adebar/carport/ip_address/state", ip_char);
 }
 
 void debugInfos()

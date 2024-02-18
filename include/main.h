@@ -9,6 +9,7 @@
 #include <PubSubClient.h>
 #include <credentials.h>
 #include <ArduinoOTA.h>
+#include <ArduinoJson.h>
 
 #define CLOCK_PIN D5
 #define MOSI_PIN D7
@@ -51,14 +52,8 @@ void errorCallback();
 
 void debugInfos();
 
-// MQTT stuff
-#define MQTT_ID "smartgate"
-#define MQTT_STATUS_UPDATE_TIME 60 * 1000 // Every minute
-#define MQTT_SMARTGATE_CHANNEL "adebar/smartgate/state"
-#define MQTT_SMARTGATE_TOGGLE "adebar/smartgate/toggle"
-#define MQTT_SMARTGATE_OPEN "adebar/smartgate/open"
-#define MQTT_SMARTGATE_CLOSE "adebar/smartgate/close"
-
 void mqtt_reconnect();
 void mqtt_callback(char *topic, byte *payload, unsigned int length);
-void mqtt_send_status();
+void mqtt_send_status(boolean full);
+void mqtt_send_adebar_carport_gate(boolean full);
+void mqtt_send_adebar_carport_ip_address(boolean full);
