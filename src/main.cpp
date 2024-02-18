@@ -82,12 +82,16 @@ void setup()
 
   // disable ERROR LED
   shiftOutput.digitalWrite(SHIFT_PIN_LED_ERROR, LOW);
+
+  ArduinoOTA.begin();
 }
 void loop()
 {
   loopCount++;
   uint8_t loop15 = loopCount % 15;
   unsigned long currentMillis = millis();
+
+  ArduinoOTA.handle();
 
   if (!client.connected())
     mqtt_reconnect();

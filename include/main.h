@@ -8,6 +8,7 @@
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
 #include <credentials.h>
+#include <ArduinoOTA.h>
 
 #define CLOCK_PIN D5
 #define MOSI_PIN D7
