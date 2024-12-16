@@ -28,13 +28,12 @@ WiFiClient espClient;
 PubSubClient client(espClient);
 uint32_t lastMqttStatusUpdate = 0;
 
+bool debugMqtt = false;
+
 void setup()
 {
   // Start serial for debugging
   Serial.begin(115200);
-
-  // Load 256 bytes from EEPROM
-  EEPROM.begin(256);
 
   // initialize adc and shift register
   adc.begin(CS_ADC_PIN, MOSI_PIN, MISO_PIN, CLOCK_PIN);
@@ -43,12 +42,21 @@ void setup()
   // enable ERROR LED
   shiftOutput.digitalWrite(SHIFT_PIN_LED_ERROR, HIGH);
 
-  // load last settings from EEPROM and initialize motors
+  // enable power suppy
+  shiftOutput.digitalWrite(SHIFT_PIN_RELAY_4_POWER_SUPPLY, LOW);
+  powerSupplyActivatedAt = millis() + MILLIS_AFTER_POWER_SUPPLY_ACTIVATED;
+  powerSupplyShutdownAt = 0;
+
+  // load adjusted settings and initialize motors
   MotorSetting setting0, setting1;
-  EEPROM.get(0, setting0);
+
+  setting0.closeAt = 6399;
+  setting0.openAt = 1000;
   motor0.begin(MOTOR0_0, MOTOR0_1, &adc, MOTOR0_SPEED_CHANNEL, setting0);
   motor0.errorCallback = &errorCallback;
-  EEPROM.get(128, setting1);
+
+  setting1.closeAt = 6523;
+  setting1.openAt = 1000;
   motor1.begin(MOTOR1_0, MOTOR1_1, &adc, MOTOR1_SPEED_CHANNEL, setting1);
   motor1.errorCallback = &errorCallback;
 
@@ -78,7 +86,12 @@ void setup()
   client.setServer(mqttServer, mqttPort);
   client.setCallback(mqtt_callback);
 
-  debugInfos();
+  debugInfos(false);
+
+  while (powerSupplyActivatedAt > millis())
+  {
+    // wait for power supply
+  }
 
   // disable ERROR LED
   shiftOutput.digitalWrite(SHIFT_PIN_LED_ERROR, LOW);
@@ -104,6 +117,10 @@ void loop()
   motor0.handle(currentMillis);
   motor1.handle(currentMillis);
 
+  // ignore other stuff while startup
+  if (motor0.startup || motor1.startup)
+    return;
+
   // handle button changes
   // but not every loop
   // see: https://arduino.stackexchange.com/questions/19787/esp8266-analog-read-interferes-with-wifi
@@ -122,7 +139,7 @@ void loop()
     shiftOutput.digitalWrite(SHIFT_PIN_RELAY_4_POWER_SUPPLY, HIGH);
     powerSupplyShutdownAt = 0;
     mqtt_send_adebar_carport_gate(false);
-    debugInfos();
+    debugInfos(false);
   }
 
   if (wantedTarget != target)
@@ -159,11 +176,6 @@ void loop()
       {
         // disable error led if full opened or closed
         shiftOutput.digitalSet(SHIFT_PIN_LED_ERROR, LOW);
-
-        // and save state
-        EEPROM.put(0, motor0.setting);
-        EEPROM.put(128, motor1.setting);
-        EEPROM.commit();
 
         powerSupplyShutdownAt = currentMillis + MILLIS_POWER_SUPPLY_SHUTDOWN_TIME;
       }
@@ -315,11 +327,6 @@ void learnPressed()
 
     Serial.println("LEARN MODE OFF");
 
-    // save state
-    EEPROM.put(0, motor0.setting);
-    EEPROM.put(128, motor1.setting);
-    EEPROM.commit();
-
     btn0.pressTimeMillis = 3000; // long press time
     shiftOutput.digitalSet(SHIFT_PIN_LED_LEARN, LOW);
     shiftOutput.digitalSet(SHIFT_PIN_LED_0, LOW);
@@ -393,12 +400,19 @@ void mqtt_callback(char *topic, byte *payload, unsigned int length)
       lastTarget = wantedTarget = close;
     else if (!strncmp((char *)payload, "OPEN", length))
       lastTarget = wantedTarget = open;
+    else if (!strncmp((char *)payload, "LEARN", length))
+      learnPressed();
     return;
   }
   if (!strcmp(topic, "adebar/carport/system/set"))
   {
-    if (!strncmp((char *)payload, "RESTART", length)) {
+    if (!strncmp((char *)payload, "RESTART", length))
+    {
       ESP.restart();
+    }
+    else if (!strncmp((char *)payload, "DEBUG", length))
+    {
+      debugInfos(true);
     }
     return;
   }
@@ -480,7 +494,7 @@ void mqtt_send_adebar_carport_ip_address(boolean full)
   client.publish("adebar/carport/ip_address/state", ip_char);
 }
 
-void debugInfos()
+void debugInfos(bool mqtt)
 {
   Serial.print("Motor 0 openAt:");
   Serial.println(motor0.setting.openAt);
@@ -495,4 +509,33 @@ void debugInfos()
   Serial.println(motor1.setting.closeAt);
   Serial.print("Motor 1 currentSteps:");
   Serial.println(motor1.setting.currentSteps);
+
+  debugMqtt = debugMqtt || mqtt;
+  if (debugMqtt)
+  {
+    char buffer[32];
+
+    sprintf(buffer, "Motor 0 openAt: %d", motor0.setting.openAt);
+    client.publish("adebar/carport/debug", buffer);
+    sprintf(buffer, "Motor 0 closeAt: %d", motor0.setting.closeAt);
+    client.publish("adebar/carport/debug", buffer);
+    sprintf(buffer, "Motor 0 currentSteps: %d", motor0.setting.currentSteps);
+    client.publish("adebar/carport/debug", buffer);
+
+    sprintf(buffer, "Motor 1 openAt: %d", motor1.setting.openAt);
+    client.publish("adebar/carport/debug", buffer);
+    sprintf(buffer, "Motor 1 closeAt: %d", motor1.setting.closeAt);
+    client.publish("adebar/carport/debug", buffer);
+    sprintf(buffer, "Motor 1 currentSteps: %d", motor1.setting.currentSteps);
+    client.publish("adebar/carport/debug", buffer);
+
+    sprintf(buffer, "Power supply: %d", !shiftOutput.digitalRead(SHIFT_PIN_RELAY_4_POWER_SUPPLY));
+    client.publish("adebar/carport/debug", buffer);
+    sprintf(buffer, "Wanted target: %d", wantedTarget);
+    client.publish("adebar/carport/debug", buffer);
+    sprintf(buffer, "Target: %d", target);
+    client.publish("adebar/carport/debug", buffer);
+    sprintf(buffer, "state: %d", state);
+    client.publish("adebar/carport/debug", buffer);
+  }
 }

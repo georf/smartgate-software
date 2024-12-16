@@ -1,4 +1,5 @@
 #include "Motor.h"
+#include <PubSubClient.h>
 
 /*
 
@@ -31,6 +32,10 @@ void Motor::begin(uint8_t motor_pin_open, uint8_t motor_pin_close, MCP3008 *adc,
 
     setting = loaded;
 
+    // for startup
+    target = close;
+    state = unknown;
+
     pinMode(_motor_pin_open, OUTPUT);
     pinMode(_motor_pin_close, OUTPUT);
 }
@@ -54,7 +59,7 @@ void Motor::handle(unsigned long current_millis)
                 {
                     Serial.print("ERROR! SOFT ");
                     Serial.print(last3);
-                    errorCallback();
+                    error();
                 }
             }
             else if (state == opening || state == closing)
@@ -63,7 +68,7 @@ void Motor::handle(unsigned long current_millis)
                 {
                     Serial.print("ERROR! FULL ");
                     Serial.print(last3);
-                    errorCallback();
+                    error();
                 }
             }
             last_step_millis[2] = last_step_millis[1];
@@ -216,4 +221,17 @@ void Motor::learnClose()
     setting.closeAt = setting.currentSteps;
     _learn = false;
     target = stop;
+}
+
+
+void Motor::error()
+{
+  if (startup) {
+    setting.currentSteps = setting.closeAt;
+    _learn = false;
+    startup = false;
+    target = stop;
+  } else {
+    errorCallback();
+  }
 }

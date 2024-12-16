@@ -4,7 +4,6 @@
 #include <Switch.h>
 #include <ShiftOutput.h>
 #include <Motor.h>
-#include <EEPROM.h>
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
 #include <credentials.h>
@@ -50,7 +49,7 @@ void btn3Callback();
 // if a motor has an error
 void errorCallback();
 
-void debugInfos();
+void debugInfos(bool mqtt);
 
 void mqtt_reconnect();
 void mqtt_callback(char *topic, byte *payload, unsigned int length);

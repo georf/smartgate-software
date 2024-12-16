@@ -1,6 +1,5 @@
 #include "Arduino.h"
 #include <MCP3XXX.h>
-#include <EEPROM.h>
 
 enum motor_target_or_state
 {
@@ -42,12 +41,13 @@ private:
     bool _last_step_high = false;
     bool _last_target_opening = false;
     unsigned long last_step_millis[3] = {0, 0, 0};
-    bool _learn = false;
+    bool _learn = true;
 
 public:
     MotorSetting setting;
     motor_target_or_state target = close;
     motor_target_or_state state = close;
+    bool startup = true;
     void (*errorCallback)();
     void begin(uint8_t motor_pin_open, uint8_t motor_pin_close, MCP3008 *adc, uint8_t adc_channel, MotorSetting &loaded);
     void handle(unsigned long current_millis);
@@ -55,4 +55,5 @@ public:
     void learnOpen();
     void learnStartClose();
     void learnClose();
+    void error();
 };
