@@ -1,237 +1,204 @@
 #include "Motor.h"
-#include <PubSubClient.h>
 
-/*
-
-at closing:
-
-1000 _open
-1010 setting.openAt  + STEP_TOLERANCE
-1100 setting.openAt  + STEP_START_SOFTING
-7000 setting.closeAt - STEP_END_SOFTING
-7990 setting.closeAt - STEP_TOLERANCE
-8000 setting.closeAt
-
-at opening:
-
-8000 setting.closeAt
-7990 setting.closeAt - STEP_TOLERANCE
-7900 setting.closeAt - STEP_START_SOFTING
-2000 setting.openAt  + STEP_END_SOFTING
-1010 setting.openAt  + STEP_TOLERANCE
-1000 _open
-
-*/
-
-void Motor::begin(uint8_t motor_pin_open, uint8_t motor_pin_close, MCP3008 *adc, uint8_t adc_channel, MotorSetting &loaded)
+void Motor::begin(uint8_t motorPinOpen, uint8_t motorPinClose, MCP3008 *adc, uint8_t adcSpeedChannel, uint8_t adcHallChannel, uint32_t openAt, unsigned long startDelay)
 {
-    _motor_pin_open = motor_pin_open;
-    _motor_pin_close = motor_pin_close;
-    _adc = adc;
-    _adc_channel = adc_channel;
 
-    setting = loaded;
+  // Einstellungen übernehmen
+  _motorPinOpen = motorPinOpen;
+  _motorPinClose = motorPinClose;
+  _adc = adc;
+  _adcSpeedChannel = adcSpeedChannel;
+  _adcHallChannel = adcHallChannel;
+  _openAt = openAt;
+  _startDelay = startDelay;
 
-    // for startup
-    target = close;
-    state = unknown;
+  // Ausgabe-PINs konfigurieren
+  pinMode(_motorPinOpen, OUTPUT);
+  pinMode(_motorPinClose, OUTPUT);
 
-    pinMode(_motor_pin_open, OUTPUT);
-    pinMode(_motor_pin_close, OUTPUT);
+  // Erstmal alle stoppen
+  doStop();
+
+  // Zum Starten öffnen wir Stück
+  _currentSteps = _openAt - STEP_TOLERANCE - STEP_TOLERANCE;
+  doOpen();
 }
 
-void Motor::handle(unsigned long current_millis)
+void Motor::handle(unsigned long currentMillis)
 {
-    if ((_adc->analogRead(_adc_channel) > STEP_THRESHOLD) != _last_step_high)
+  // Wenn wir nicht laufen, brauchen wir auch nichts machen
+  if (!_running)
+    return;
+
+  // Wenn sich die Spanung noch nicht aufgebaut hat, machen wir auch nichts
+  if (milliVoltage < MIN_VOLTAGE)
+  {
+    analogWrite(_motorPinOpen, SPEED_STOP);
+    analogWrite(_motorPinClose, SPEED_STOP);
+
+    _runningStart = currentMillis; // Startzeitpunkt zurücksetzen
+
+    return;
+  }
+
+  // Wenn letzter Stopp gerade erst war, warten wir kurz, um Induktivität abzubauen
+  if (_runningStop + STARTUP_CURRENT_TIME*2 + _startDelay > currentMillis)
+  {
+    _runningStart = currentMillis; // Startzeitpunkt zurücksetzen
+    return;
+  }
+
+  handleStepCounting();
+  handleSpeedZone(currentMillis);
+  handleSafetyCurrent(currentMillis);
+
+  // Offen, also stoppen
+  if (_targetOpening && _currentSteps >= _openAt)
+  {
+    Serial.print("_currentSteps");
+    Serial.println(_currentSteps);
+    doStop();
+
+    // Beim ersten Öffnen, war das nur ein kleines Stück. Wir schließen.
+    if (_startup)
     {
-        _last_step_high = !_last_step_high;
-        if (_last_target_opening)
-            setting.currentSteps--;
-        else
-            setting.currentSteps++;
-
-        if (target != stop)
-        {
-            unsigned long last3 = (current_millis - last_step_millis[2]);
-            if (state == opening_soft || state == closing_soft)
-            {
-                if (last3 > SPEED_SOFT_MILLIS_LAST3)
-                {
-                    Serial.print("ERROR! SOFT ");
-                    Serial.print(last3);
-                    error();
-                }
-            }
-            else if (state == opening || state == closing)
-            {
-                if (last3 > SPEED_FULL_MILLIS_LAST3)
-                {
-                    Serial.print("ERROR! FULL ");
-                    Serial.print(last3);
-                    error();
-                }
-            }
-            last_step_millis[2] = last_step_millis[1];
-            last_step_millis[1] = last_step_millis[0];
-            last_step_millis[0] = current_millis;
-        }
+      _startup = false;
+      _currentSteps = _closeAt + STEP_TOLERANCE + STEP_TOLERANCE;
+      doClose();
     }
+  }
+}
 
-    if (target == state)
-        return;
+void Motor::doOpen()
+{
+  if (isOpenPosition())
+    return;
 
-    if (target == stop)
+  Serial.print(_motorPinOpen);
+  Serial.println(" doOpen");
+
+  _avarageCurrent = CURRENT_ZERO;
+
+  _targetOpening = true;
+  _running = true;
+  _runningStart = millis();
+}
+
+void Motor::doClose()
+{
+
+  if (isClosePosition())
+    return;
+
+  _targetOpening = false;
+  _running = true;
+  _runningStart = millis();
+
+  _avarageCurrent = CURRENT_ZERO;
+
+  Serial.print(_motorPinOpen);
+  Serial.println(" doClose");
+}
+
+void Motor::doStop()
+{
+  Serial.print(_motorPinOpen);
+  Serial.println(" doStop");
+
+  analogWrite(_motorPinOpen, SPEED_STOP);
+  analogWrite(_motorPinClose, SPEED_STOP);
+  _avarageCurrent = CURRENT_ZERO;
+  _running = false;
+  _runningStop = millis();
+}
+
+bool Motor::isOpenPosition()
+{
+  return _currentSteps >= _openAt - STEP_TOLERANCE;
+}
+
+bool Motor::isClosePosition()
+{
+  return _currentSteps <= _closeAt + STEP_TOLERANCE;
+}
+
+void Motor::handleSpeedZone(unsigned long currentMillis)
+{
+  int stepsToTarget = _targetOpening ? (_openAt - _currentSteps) : (_currentSteps - _closeAt);
+  uint8_t speed = (stepsToTarget <= 100) ? SPEED_SOFT : SPEED_FULL;
+
+  unsigned long millisSinceStart = (currentMillis - _runningStart);
+  if (millisSinceStart < 256 * 7)
+    speed = millisSinceStart / 7;
+
+  analogWrite(_motorPinOpen, _targetOpening ? speed : 0);
+  analogWrite(_motorPinClose, !_targetOpening ? speed : 0);
+}
+
+void Motor::handleSafetyCurrent(unsigned long currentMillis)
+{
+  const uint32_t rawCurrent = _adc->analogRead(_adcHallChannel);
+  _avarageCurrent = (10 * _avarageCurrent + rawCurrent) / 11;
+
+  uint32_t realMilliCurrent;
+  if (_avarageCurrent < CURRENT_ZERO)
+    realMilliCurrent = (CURRENT_ZERO - _avarageCurrent) * 1000 / CURRENT_REAL_FACTOR;
+  else
+    realMilliCurrent = (_avarageCurrent - CURRENT_ZERO) * 1000 / CURRENT_REAL_FACTOR;
+
+  uint32_t milliWatt = realMilliCurrent * milliVoltage / 1000;
+
+  boolean closed = !_targetOpening && _currentSteps < (_closeAt + STEP_TOLERANCE);
+
+  // Serial.printf("volt: %06d   watt: %06d  current: %05d, orig: %05d\n", milliVoltage, milliWatt, realMilliCurrent, _avarageCurrent);
+
+  // Wenn Wert zu hoch, ist er irgendwo gegen gefahren
+  uint32_t threshold;
+
+  if (closed)
+    threshold = POWER_THRESHOLD_END;
+  else
+    threshold = _runningStart + STARTUP_CURRENT_TIME > currentMillis ? POWER_THRESHOLD_STARTUP : POWER_THRESHOLD;
+
+  if (milliWatt > threshold)
+  {
+    doStop();
+    Serial.print("watt: ");
+    Serial.println(milliWatt);
+    Serial.println(threshold);
+
+    // Ist komplett geschlossen, also okay
+    if (closed)
     {
-        analogWrite(_motor_pin_open, SPEED_STOP);
-        analogWrite(_motor_pin_close, SPEED_STOP);
-
-        if (setting.currentSteps + STEP_TOLERANCE > setting.closeAt && setting.currentSteps - STEP_TOLERANCE < setting.closeAt)
-        {
-            state = close;
-        }
-        else if (setting.currentSteps + STEP_TOLERANCE > setting.openAt && setting.currentSteps - STEP_TOLERANCE < setting.openAt)
-        {
-            state = open;
-        }
-        else
-        {
-            state = stop;
-        }
+      Serial.print("geschlossen bei: ");
+      Serial.print(_currentSteps);
+      _currentSteps = _closeAt;
+      Serial.print("ersetzt durch: ");
+      Serial.println(_currentSteps);
     }
-
-    if (!_learn && (((state == opening || state == opening_soft) && setting.currentSteps < (setting.openAt + STEP_TOLERANCE)) ||
-                    ((state == closing || state == closing_soft) && setting.currentSteps > (setting.closeAt - STEP_TOLERANCE))))
+    else
     {
-        Serial.println("Debug: stopping");
-        target = stop;
-        analogWrite(_motor_pin_open, SPEED_STOP);
-        analogWrite(_motor_pin_close, SPEED_STOP);
+      errorCallback(milliWatt);
     }
-    else if (target == open)
-    {
-        _last_target_opening = true;
-        analogWrite(_motor_pin_close, SPEED_STOP);
-        if (_learn ||
-            ((state == opening || state == opening_soft) && setting.currentSteps < (setting.openAt + STEP_END_SOFTING)))
-        {
-            if (state != opening_soft)
-            {
-                Serial.println("Debug: opening_soft");
-                state = opening_soft;
-                analogWrite(_motor_pin_open, SPEED_SOFT);
-
-                last_step_millis[0] = last_step_millis[1] = last_step_millis[2] = current_millis;
-            }
-        }
-        else if (state == close || state == stop || state == opening_soft)
-        {
-            if (setting.currentSteps > (setting.closeAt - STEP_START_SOFTING))
-            {
-                if (state != opening_soft)
-                {
-                    Serial.println("Debug: opening_soft");
-                    state = opening_soft;
-                    analogWrite(_motor_pin_open, SPEED_SOFT);
-
-                    last_step_millis[0] = last_step_millis[1] = last_step_millis[2] = current_millis;
-                }
-            }
-            else
-            {
-                if (state != opening)
-                {
-                    Serial.println("Debug: opening");
-                    state = opening;
-                    analogWrite(_motor_pin_open, SPEED_FULL);
-
-                    last_step_millis[0] = last_step_millis[1] = last_step_millis[2] = current_millis;
-                }
-            }
-        }
-    }
-    else if (target == close)
-    {
-        _last_target_opening = false;
-        analogWrite(_motor_pin_open, SPEED_STOP);
-        if (_learn ||
-            ((state == closing || state == closing_soft) && setting.currentSteps > (setting.closeAt - STEP_END_SOFTING)))
-        {
-            if (state != closing_soft)
-            {
-                Serial.println("Debug: closing_soft");
-                state = closing_soft;
-                analogWrite(_motor_pin_close, SPEED_SOFT);
-
-                last_step_millis[0] = last_step_millis[1] = last_step_millis[2] = current_millis;
-            }
-        }
-        else if (state == open || state == stop || state == closing_soft)
-        {
-            if (setting.currentSteps < (setting.openAt + STEP_START_SOFTING))
-            {
-                if (state != closing_soft)
-                {
-                    Serial.println("Debug: closing_soft");
-                    state = closing_soft;
-                    analogWrite(_motor_pin_close, SPEED_SOFT);
-
-                    last_step_millis[0] = last_step_millis[1] = last_step_millis[2] = current_millis;
-                }
-            }
-            else
-            {
-                if (state != closing)
-                {
-                    Serial.println("Debug: closing");
-                    state = closing;
-                    analogWrite(_motor_pin_close, SPEED_FULL);
-
-                    last_step_millis[0] = last_step_millis[1] = last_step_millis[2] = current_millis;
-                }
-            }
-        }
-    }
+  }
 }
 
-void Motor::learnStartOpen()
+// Zählen wenn eine Umdrehung gemacht wurde
+void Motor::handleStepCounting()
 {
-    _learn = true;
-    setting.currentSteps = 100000;
-    setting.openAt = 1000;
-    setting.closeAt = 200000;
-    target = open;
-    state = unknown;
-}
+  uint32_t value = _adc->analogRead(_adcSpeedChannel);
+  if ((value > STEP_THRESHOLD) != _lastStepHigh)
+  {
+    _lastStepHigh = !_lastStepHigh;
 
-void Motor::learnOpen()
-{
-    setting.currentSteps = 1000;
-    target = stop;
-    state = unknown;
-}
+    if (_targetOpening)
+      _currentSteps++;
+    else
+      _currentSteps--;
 
-void Motor::learnStartClose()
-{
-    target = close;
-    state = unknown;
-}
-
-void Motor::learnClose()
-{
-    setting.closeAt = setting.currentSteps;
-    _learn = false;
-    target = stop;
-}
-
-
-void Motor::error()
-{
-  if (startup) {
-    setting.currentSteps = setting.closeAt;
-    _learn = false;
-    startup = false;
-    target = stop;
-  } else {
-    errorCallback();
+    // Serial.print("Channel: ");
+    // Serial.print(_adcSpeedChannel);
+    // Serial.print(" Steps: ");
+    // Serial.println(_currentSteps);
   }
 }
