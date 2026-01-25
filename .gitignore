@@ -4,3 +4,6 @@
 .vscode/launch.json
 .vscode/ipch
 /src/credentials.cpp
+/SmartGate3/SmartGate3-backups/
+/SmartGate3/out/
+/SmartGate3/fp-info-cache
