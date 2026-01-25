@@ -1,281 +1,94 @@
 #include "main.h"
 
-ShiftOutput shiftOutput; // shift register controller
-MCP3008 adc;             // analog digital converter
-Motor motorL;            // motor left handler
-Motor motorR;            // motor right handler
+// Aktuelle Zeit immer nur einmal pro Loop lesen
+unsigned long now;
 
-unsigned long lastToggle = 0; // last toggle millis
-uint8_t loopCount = 0;
-uint8_t voltageCounter = 0;
-uint32_t avarageVoltage = 5;
+#define PIN_SCL D1
+#define PIN_SDA D4
 
-AdcTribleSwitch btns(&adc, 2);       // btns
-AdcSwitch radioB(&adc, 6, 800, LOW); // connected to radio B
-AdcSwitch radioC(&adc, 7, 800, LOW); // connected to radio C
-AdcSwitch radioD(&adc, 5, 800, LOW); // connected to radio D
+// ----------------------------------------------------------
+// MCP23017
+// ----------------------------------------------------------
+#define MCP_ADDR 0x20
+MCP23017Controller mcp;
 
-LedsHandler leds(&shiftOutput); // LEDs Interface
+// GPA
+#define LED_GATE_1 0
+#define LED_GATE_2 1
+#define SW_24V 2
+#define SW_BTN 3
+#define SW_REED_RIGHT 4
+#define SW_REED_LEFT 5
+
+// GPB
+#define SW_RADIO2 8 + 4
+#define SW_RADIO1 8 + 5
+#define SW_RADIO0 8 + 6
+
+// Relais Backend
+#define RELAY_0_GATE_MOTOR 0
+#define RELAY_1_UNUSED 1
+#define RELAY_2_UNUSED 2
+#define RELAY_3_UNUSED 3
+
+Relay relays[4] = {
+    Relay(mcp, RELAY_0_GATE_MOTOR, (char *)"Tor-Motor", 20, 0),
+    Relay(mcp, RELAY_1_UNUSED, (char *)"Unbenutzt", 0, 0),
+    Relay(mcp, RELAY_2_UNUSED, (char *)"Unbenutzt", 0, 0),
+    Relay(mcp, RELAY_3_UNUSED, (char *)"Unbenutzt", 0, 0),
+};
+
+// ----------------------------------------------------------
+// Motor Pins
+// ----------------------------------------------------------
+
+#define MOTOR_LEFT_COUNT D7
+#define MOTOR_LEFT_PWM_OPEN D3
+#define MOTOR_LEFT_PWM_CLOSE D5
+#define MOTOR_LEFT_CURRENT_CHANNEL 0
+
+#define MOTOR_RIGHT_COUNT D2
+#define MOTOR_RIGHT_PWM_OPEN D6
+#define MOTOR_RIGHT_PWM_CLOSE D8
+#define MOTOR_RIGHT_CURRENT_CHANNEL 1
+
+Motor motorLeft;  // motor left handler
+Motor motorRight; // motor right handler
 
 motor_target_or_state wantedTarget = close;
 motor_target_or_state lastTarget = close;
 motor_target_or_state state = closing;
+unsigned long lastToggle = 0; // last toggle millis
+#define MILLIS_BETWEEN_TOGGLE 1000
 
-unsigned long nextDebugPrint = 0; // last toggle millis
+// ----------------------------------------------------------
+// WLAN & MQTT
+// ----------------------------------------------------------
+#define WLAN_RECONNECT_TIME 10000           // 10 Sekunden
+#define MQTT_RECONNECT_TIME 5000            // 5 Sekunden
+#define MQTT_STATUS_INTERVAL 10 * 60 * 1000 // 10 Minuten
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
 
-void setup()
-{
-  
-  pinMode(MOTOR_L_OPEN, OUTPUT);
-  analogWrite(MOTOR_L_OPEN, 0);
-  pinMode(MOTOR_L_CLOSE, OUTPUT);
-  analogWrite(MOTOR_L_CLOSE, 0);
-  pinMode(MOTOR_R_OPEN, OUTPUT);
-  analogWrite(MOTOR_R_OPEN, 0);
-  pinMode(MOTOR_R_CLOSE, OUTPUT);
-  analogWrite(MOTOR_R_CLOSE, 0);
+#define MAX_MQTT_BUFFER_ENTRIES 32
+struct mqttBuffer {
+  char topic[56];
+  char payload[64];
+};
+mqttBuffer mqttSendBuffer[MAX_MQTT_BUFFER_ENTRIES];
+unsigned int mqttSendBufferIndex = 0;
 
-  // Start serial for debugging
-  Serial.begin(115200);
+unsigned long lastWifiReconnect = 0;
+unsigned long lastMqttReconnect = 0;
+unsigned long lastMqttStatusUpdate = 0;
+void mqttSendStatus(bool full);
 
-  // warte eine Sekunde für eine stabile Spannungsversorgung
-  delay(1000);
-
-  // A0 für die Spannungsüberwachung
-  pinMode(A0, INPUT);
-
-  // initialize adc and shift register
-  adc.begin(CS_ADC_PIN, MOSI_PIN, MISO_PIN, CLOCK_PIN);
-  shiftOutput.begin(MOSI_PIN, CS_SHIFT_PIN, CLOCK_PIN);
-
-  shiftOutput.digitalSet(SHIFT_PIN_RELAY_1_NC, HIGH);
-  shiftOutput.digitalSet(SHIFT_PIN_RELAY_2_NC, HIGH);
-  shiftOutput.digitalSet(SHIFT_PIN_RELAY_3_NC, HIGH);
-  shiftOutput.digitalSet(SHIFT_PIN_RELAY_4_POWER_SUPPLY, HIGH);
-
-  // initialize motors
-  motorL.begin(MOTOR_L_OPEN, MOTOR_L_CLOSE, &adc, MOTOR_L_SPEED_CHANNEL, MOTOR_L_HALL_CHANNEL, 6250, 0); // eigentlich 5000
-  motorL.errorCallback = &gateError;
-  motorR.begin(MOTOR_R_OPEN, MOTOR_R_CLOSE, &adc, MOTOR_R_SPEED_CHANNEL, MOTOR_R_HALL_CHANNEL, 6200, 1000);
-  motorR.errorCallback = &gateError;
-
-  // set callbacks for buttons and radio modul
-  btns.onBtn0Callback = &btn0Callback;
-  btns.onBtn1Callback = &btn1Callback;
-  btns.onBtn2Callback = &btn2Callback;
-  radioB.onHighCallback = &radioBCallback;
-  radioC.onHighCallback = &radioCCallback;
-  radioD.onHighCallback = &radioDCallback;
-
-  wifiAndMqttStartup();
-
-}
-void loop()
-{
-  loopCount++;
-  uint8_t loop15 = loopCount % 15;
-  const unsigned long currentMillis = millis();
-
-  wifiAndMqttLoop(currentMillis);
-
-  // handle changes at both motors
-  motorL.handle(currentMillis);
-  motorR.handle(currentMillis);
-
-  if (loop15 == 0)
-  {
-    if (gateRunning())
-    {
-      leds.set(LED_WARN0, fastBlink);
-      leds.set(LED_WARN1, fastBlinkReverse);
-      
-      shiftOutput.digitalWrite(SHIFT_PIN_RELAY_4_POWER_SUPPLY, LOW);
-      if (wantedTarget == open && state != opening)
-      {
-        state = opening;
-        mqttSendStatus(false);
-      }
-      else if (wantedTarget == close && state != closing)
-      {
-        state = closing;
-        mqttSendStatus(false);
-      }
-    }
-    else
-    {
-      leds.set(LED_WARN0, off);
-      leds.set(LED_WARN1, off);
-      
-      shiftOutput.digitalWrite(SHIFT_PIN_RELAY_4_POWER_SUPPLY, HIGH);
-      if (wantedTarget != state)
-      {
-        if (wantedTarget == open && motorL.isOpenPosition() && motorR.isOpenPosition())
-        {
-          state = open;
-          mqttSendStatus(false);
-        }
-        else if (wantedTarget == close && motorL.isClosePosition() && motorR.isClosePosition())
-        {
-          state = close;
-          mqttSendStatus(false);
-        }
-        else
-        {
-          state = stop;
-          mqttSendStatus(false);
-        }
-      }
-    }
-  }
-  
-  // handle button changes
-  else if (loop15 == 2)
-    btns.read(currentMillis);
-  else if (loop15 == 3)
-    radioB.read(currentMillis);
-  else if (loop15 == 4)
-    radioC.read(currentMillis);
-  else if (loop15 == 5)
-    radioD.read(currentMillis);
-  else if (loop15 == 6)
-    leds.handle(currentMillis);
-  else if (loop15 == 13)
-  {
-    voltageCounter++;
-
-    if (voltageCounter > 40)
-    {
-      int milliVoltage = analogRead(A0) * 35;
-      avarageVoltage = (3 * avarageVoltage + milliVoltage) / 4;
-      motorL.milliVoltage = avarageVoltage;
-      motorR.milliVoltage = avarageVoltage;
-      voltageCounter = 0;
-    }
-  }
-  else if (loop15 == 14 && currentMillis > nextDebugPrint)
-  {
-    // nextDebugPrint = currentMillis + 200;
-
-    // Serial.print("0: ");
-    // Serial.println(adc.analogRead(0));
-
-    // Serial.print("1: ");
-    // Serial.println(adc.analogRead(1));
-
-    // Serial.print("2: ");
-    // Serial.println(adc.analogRead(2));
-
-    // Serial.print("3: ");
-    // Serial.println(adc.analogRead(3));
-
-    // Serial.print("4: ");
-    // Serial.println(adc.analogRead(4));
-
-    // Serial.print("5: ");
-    // Serial.println(adc.analogRead(5));
-
-    // Serial.print("6: ");
-    // Serial.println(adc.analogRead(6));
-
-    // Serial.print("7: ");
-    // Serial.println(adc.analogRead(7));
-
-    // Serial.println();
-  }
-}
-
-void btn0Callback()
-{
-  Serial.println("btn0Callback");
-  // intern btn
-}
-
-void btn1Callback()
-{
-  gateToggle();
-}
-
-void btn2Callback()
-{
-  // not connected
-}
-
-void radioBCallback()
-{
-  gateToggle();
-}
-
-void radioCCallback()
-{
-  mqttPublish("adebar/garage/cover/set", "TOGGLE");
-}
-
-void radioDCallback()
-{
-  mqttPublish("adebar/klingelbox/bell_button/set", "SET");
-}
-
-void gateToggle()
-{
-  if (millis() < lastToggle + MILLIS_BETWEEN_TOGGLE)
-    return;
-
-  lastToggle = millis();
-
-  if (gateRunning())
-  {
-    gateStop();
-  }
-  else if (lastTarget == open)
-  {
-    gateClose();
-  }
-  else
-  {
-    gateOpen();
-  }
-}
-
-void gateOpen()
-{
-  wantedTarget = open;
-  lastTarget = open;
-  motorL.doOpen();
-  motorR.doOpen();
-}
-
-void gateClose()
-{
-  wantedTarget = close;
-  lastTarget = close;
-  motorL.doClose();
-  motorR.doClose();
-}
-
-void gateStop()
-{
-  wantedTarget = stop;
-  motorL.doStop();
-  motorR.doStop();
-}
-
-void gateError(uint32_t milliWatt)
-{
-  char buffer[100];
-
-  sprintf(buffer, "gate-error %d", milliWatt);
-  Serial.println(buffer);
-  gateStop();
-  mqttPublish("adebar/carport/debug", buffer);
-}
-
-bool gateRunning()
-{
-  return motorL._running || motorR._running;
-}
 
 void mqttCallback(char *topic, byte *payload, unsigned int length)
 {
+
+  char buffer[56];
+
   if (!strcmp(topic, "adebar/carport/gate/set"))
   {
     if (!strncmp((char *)payload, "STOP", length))
@@ -284,66 +97,91 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
       gateClose();
     else if (!strncmp((char *)payload, "OPEN", length))
       gateOpen();
+    else if (!strncmp((char *)payload, "TOGGLE", length))
+      gateToggle();
+    else if (!strncmp((char *)payload, "CLOSE_A_BIT_LEFT", length))
+      motorLeft.doCloseABit(now);
+    else if (!strncmp((char *)payload, "CLOSE_A_BIT_RIGHT", length))
+      motorRight.doCloseABit(now);
     return;
   }
+
   if (!strcmp(topic, "adebar/carport/system/set"))
   {
     if (!strncmp((char *)payload, "RESTART", length))
     {
       ESP.restart();
     }
-    else if (!strncmp((char *)payload, "DEBUG", length))
-    {
-      char buffer[100];
-      radioB.debug(buffer);
-      mqttPublish("adebar/carport/debug", buffer);
-      radioC.debug(buffer);
-      mqttPublish("adebar/carport/debug", buffer);
-      radioD.debug(buffer);
-      mqttPublish("adebar/carport/debug", buffer);
-    }
     return;
+  }
+  else if (!strncmp((char *)payload, "DEBUG", length))
+  {
+    char debugBuffer[128];
+    sprintf(debugBuffer, "State: %d, Wanted: %d, LeftSteps: %ld, RightSteps: %ld", state, wantedTarget, motorLeft.currentSteps, motorRight.currentSteps);
+    mqttDebug(debugBuffer);
+    sprintf(debugBuffer, "LeftRunning: %d, RightRunning: %d", motorLeft._running ? 1 : 0, motorRight._running ? 1 : 0);
+    mqttDebug(debugBuffer);
+    mqttSendStatus(false);
+  }
+
+  for (uint8_t relay = 0; relay < 8; relay++)
+  {
+    sprintf(buffer, "adebar/carport/relay%d/set", relay);
+    if (!strcmp(topic, buffer))
+    {
+      if (!strncmp((char *)payload, "ON", length))
+        relays[relay].triggerOrSet(true, now);
+      else if (!strncmp((char *)payload, "OFF", length))
+        relays[relay].set(false, now);
+      return;
+    }
   }
 }
 
-void mqttSendAdebarCarportGate(boolean full)
+bool connectWifiNonBlocking()
 {
-  if (full)
+  if (WiFi.status() == WL_CONNECTED)
+    return true;
+
+  if (now - lastWifiReconnect < WLAN_RECONNECT_TIME)
+    return false;
+
+  lastWifiReconnect = now;
+  WiFi.begin(wifiSsid, wifiPassword);
+  return false;
+}
+
+// MQTT senden
+bool mqttPublish(const char *topic, const char *message)
+{
+  if (mqttClient.connected())
   {
-    // see https://www.home-assistant.io/integrations/cover.mqtt/
-    const char *discoveryConfig = "{"
-                                  "\"name\":\"Hoftor\","
-                                  "\"dev_cla\":\"gate\","
-                                  "\"cmd_t\":\"adebar/carport/gate/set\","
-                                  "\"stat_t\":\"adebar/carport/gate/state\","
-                                  "\"uniq_id\":\"adebar_carport_gate\","
-
-                                  "\"dev\":{"
-                                  "\"identifiers\":[\"adebar_carport\"],"
-                                  "\"name\":\"Carport\""
-                                  "}"
-                                  "}";
-    mqttPublish("homeassistant/cover/adebar_carport_gate/config", discoveryConfig);
+    mqttClient.publish(topic, message);
+    return true;
   }
+  else
+  {
+    if (mqttSendBufferIndex < MAX_MQTT_BUFFER_ENTRIES) {
+      // Kopiere Nachricht in Buffer für späteres Senden
+      strncpy(mqttSendBuffer[mqttSendBufferIndex].topic, topic, 56);
+      strncpy(mqttSendBuffer[mqttSendBufferIndex].payload, message, 64);
+      mqttSendBufferIndex++;
+    }
+    return false;
+  }
+}
 
-  if (state == open)
-    mqttPublish("adebar/carport/gate/state", "open");
-  else if (state == close)
-    mqttPublish("adebar/carport/gate/state", "closed");
-  else if (state == stop)
-    mqttPublish("adebar/carport/gate/state", "stopped");
-  else if (state == opening)
-    mqttPublish("adebar/carport/gate/state", "opening");
-  else if (state == closing)
-    mqttPublish("adebar/carport/gate/state", "closing");
-  else if (state == unknown)
-    mqttPublish("adebar/carport/gate/state", "unknown");
+// MQTT Debug senden
+bool mqttDebug(const char *message)
+{
+  return mqttPublish("adebar/carport/system/debug", message);
 }
 
 void mqttSendAdebarCarportIpAddress(boolean full)
 {
   if (full)
   {
+
     // see https://www.home-assistant.io/integrations/sensor.mqtt/
     const char *discoveryConfig = "{"
                                   "\"name\":\"Carport IP-Adresse\","
@@ -364,5 +202,360 @@ void mqttSendAdebarCarportIpAddress(boolean full)
     ip.toCharArray(ip_char, ip.length() + 1);
 
     mqttPublish("adebar/carport/ip_address/state", ip_char);
+  }
+}
+
+void mqttSendAdebarCarportGate(boolean full)
+{
+  if (full)
+  {
+    // see https://www.home-assistant.io/integrations/cover.mqtt/
+    JsonDocument discoveryConfig;
+    discoveryConfig["name"] = "Hoftor";
+    discoveryConfig["dev_cla"] = "gate";
+    discoveryConfig["cmd_t"] = "adebar/carport/gate/set";
+    discoveryConfig["stat_t"] = "adebar/carport/gate/state";
+    discoveryConfig["uniq_id"] = "adebar_carport_gate";
+
+    JsonObject device = discoveryConfig["dev"].to<JsonObject>();
+    device["identifiers"][0] = "adebar_carport";
+    device["name"] = "Carport";
+
+    char buffer[256];
+    serializeJson(discoveryConfig, buffer);
+    mqttPublish("homeassistant/cover/adebar_carport/config", buffer);
+  }
+
+  if (state == open)
+    mqttPublish("adebar/carport/gate/state", "open");
+  else if (state == close)
+    mqttPublish("adebar/carport/gate/state", "closed");
+  else if (state == opening)
+    mqttPublish("adebar/carport/gate/state", "opening");
+  else if (state == closing)
+    mqttPublish("adebar/carport/gate/state", "closing");
+  else
+    mqttPublish("adebar/carport/gate/state", "stopped");
+}
+
+void mqttSendAdebarCarportRestartButton(boolean full)
+{
+  if (!full)
+    return;
+
+  // see https://www.home-assistant.io/integrations/button.mqtt/
+  const char *discoveryConfig = "{"
+                                "\"name\":\"Carport Neustart\","
+                                "\"uniq_id\":\"adebar_carport_system_restart\","
+                                "\"cmd_t\":\"adebar/carport/system/set\","
+                                "\"payload_press\":\"RESTART\","
+                                "\"dev\":{"
+                                "\"identifiers\":[\"adebar_carport\"],"
+                                "\"name\":\"Carport\""
+                                "}"
+                                "}";
+  mqttPublish("homeassistant/button/adebar_carport_system_restart/config", discoveryConfig);
+}
+
+void mqttSendStatus(boolean full)
+{
+  for (int i = 0; i < 4; i++)
+    relays[i].mqttPublishState(full);
+
+  mqttSendAdebarCarportIpAddress(full);
+  mqttSendAdebarCarportGate(full);
+  mqttSendAdebarCarportRestartButton(full);
+
+  lastMqttStatusUpdate = now;
+}
+
+bool connectMQTT()
+{
+  if (mqttClient.connected())
+    return true;
+
+  if (now - lastMqttReconnect < MQTT_RECONNECT_TIME)
+    return false;
+
+  lastMqttReconnect = now;
+
+  if (mqttClient.connect("carport3", mqttUser, mqttPassword))
+  {
+    mqttClient.subscribe("adebar/carport/+/set");
+    mqttClient.publish("adebar/carport/system/state", "connected");
+    mqttSendStatus(true);
+    
+    // Sende alle Nachrichten aus den Buffer
+    for(uint8_t i = 0; i < mqttSendBufferIndex; i++) {
+      mqttClient.publish(mqttSendBuffer[i].topic, mqttSendBuffer[i].payload);
+    }
+    mqttSendBufferIndex = 0;
+    return true;
+  }
+  else
+  {
+    Serial.print("Fehler beim MQTT-Verbindungsversuch: ");
+    Serial.println(mqttClient.state());
+    return false;
+  }
+}
+
+// ----------------------------------------------------------
+// OTA
+// ----------------------------------------------------------
+void setupOTA()
+{
+  ArduinoOTA.setHostname("garage-controller");
+  ArduinoOTA.begin();
+}
+
+Adafruit_ADS1015 ads; /* Use thi for the 12-bit version */
+
+void clickLid()
+{
+  mqttPublish("adebar/garage/cover/set", "TOGGLE");
+}
+
+void gateToggle()
+{
+  if (now < lastToggle + MILLIS_BETWEEN_TOGGLE)
+    return;
+
+  lastToggle = now;
+
+  if (gateRunning())
+    gateStop();
+  else if (lastTarget == open)
+    gateClose();
+  else
+    gateOpen();
+}
+
+void gateOpen()
+{
+  wantedTarget = open;
+  lastTarget = open;
+  motorLeft.doOpen(now);
+  motorRight.doOpen(now);
+}
+
+void gateClose()
+{
+  wantedTarget = close;
+  lastTarget = close;
+  motorLeft.doClose(now);
+  motorRight.doClose(now);
+}
+
+void gateStop()
+{
+  wantedTarget = stop;
+  motorLeft.doStop(now);
+  motorRight.doStop(now);
+}
+
+void gateError(uint32_t milliWatt)
+{
+  char buffer[100];
+
+  sprintf(buffer, "gate-error %d", milliWatt);
+  Serial.println(buffer);
+  gateStop();
+  mqttPublish("adebar/carport/debug", buffer);
+}
+
+bool gateRunning()
+{
+  return motorLeft._running || motorRight._running;
+}
+
+void clickBell()
+{
+  mqttPublish("adebar/klingelbox/bell_button/set", "SET");
+}
+
+// ----------------------------------------------------------
+// SETUP
+// ----------------------------------------------------------
+void setup()
+{
+  now = 0;
+
+  Serial.begin(115200);
+
+  // MCP23017 zurücksetzen
+  pinMode(D0, OUTPUT);
+  digitalWrite(D0, HIGH);
+  delay(10);
+  digitalWrite(D0, LOW);
+  delay(100);
+  digitalWrite(D0, HIGH);
+
+  // I2C starten
+  Wire.begin(PIN_SDA, PIN_SCL);
+
+  bool error = true;
+  bool addressFound = false;
+  for (int i = 1; i < 128; i++)
+  {
+    Wire.beginTransmission(i);
+    error = Wire.endTransmission();
+    if (error == 0)
+    {
+      addressFound = true;
+      Serial.print("0x");
+      Serial.println(i, HEX);
+    }
+  }
+  if (!addressFound)
+  {
+    Serial.println("Keine Adresse erkannt");
+  }
+  Serial.println();
+
+  // MCP einrichten
+  mcp.begin(MCP_ADDR);
+
+  mcp.setPinMode(LED_GATE_1, OUTPUT);
+  mcp.digitalWrite(LED_GATE_1, HIGH); // LED aus
+  mcp.setPinMode(LED_GATE_2, OUTPUT);
+  mcp.digitalWrite(LED_GATE_2, HIGH); // LED aus
+  mcp.setPinMode(SW_24V, INPUT);
+  mcp.configureClick(SW_BTN, INPUT_PULLUP, gateToggle, HIGH);
+  mcp.setPinMode(SW_REED_LEFT, INPUT_PULLUP);
+  mcp.setPinMode(SW_REED_RIGHT, INPUT_PULLUP);
+
+  mcp.setPinMode(8 + RELAY_0_GATE_MOTOR, OUTPUT);
+  mcp.digitalWrite(8 + RELAY_0_GATE_MOTOR, HIGH); // Relais aus
+  mcp.setPinMode(8 + RELAY_1_UNUSED, OUTPUT);
+  mcp.digitalWrite(8 + RELAY_1_UNUSED, HIGH); // Relais aus
+  mcp.setPinMode(8 + RELAY_2_UNUSED, OUTPUT);
+  mcp.digitalWrite(8 + RELAY_2_UNUSED, HIGH); // Relais aus
+  mcp.setPinMode(8 + RELAY_3_UNUSED, OUTPUT);
+  mcp.digitalWrite(8 + RELAY_3_UNUSED, HIGH); // Relais aus
+
+  mcp.configureClick(SW_RADIO2, INPUT_PULLUP, clickLid, LOW);
+  mcp.configureClick(SW_RADIO1, INPUT_PULLUP, gateToggle, LOW);
+  mcp.configureClick(SW_RADIO0, INPUT_PULLUP, clickBell, LOW);
+
+  // Analog-Digital-Wandler einrichten
+  ads.setGain(GAIN_ONE);
+  ads.begin();
+
+  now = millis();
+
+  // Motor einrichtens
+  motorLeft.begin(now, MOTOR_LEFT_PWM_OPEN, MOTOR_LEFT_PWM_CLOSE, &mcp, SW_REED_LEFT, SW_24V, &ads, MOTOR_LEFT_CURRENT_CHANNEL, 4200);
+  motorLeft.errorCallback = &gateError;
+  Motor::leftInstance = &motorLeft;
+  pinMode(MOTOR_LEFT_COUNT, INPUT_PULLUP);
+  attachInterrupt(
+      digitalPinToInterrupt(MOTOR_LEFT_COUNT),
+      Motor::isrLeft,
+      FALLING);
+
+  motorRight.begin(now, MOTOR_RIGHT_PWM_OPEN, MOTOR_RIGHT_PWM_CLOSE, &mcp, SW_REED_RIGHT, SW_24V, &ads, MOTOR_RIGHT_CURRENT_CHANNEL, 3690);
+  motorRight.errorCallback = &gateError;
+  Motor::rightInstance = &motorRight;
+  pinMode(MOTOR_RIGHT_COUNT, INPUT_PULLUP);
+  attachInterrupt(
+      digitalPinToInterrupt(MOTOR_RIGHT_COUNT),
+      Motor::isrRight,
+      FALLING);
+
+  state = stop;
+
+  // WLAN und MQTT vorbereiten
+  WiFi.mode(WIFI_STA);
+  mqttClient.setBufferSize(1024);
+  mqttClient.setServer(mqttServer, mqttPort);
+  mqttClient.setCallback(mqttCallback);
+
+  // Over the Air updates
+  setupOTA();
+
+  // Alle Relais aus
+  for (int i = 0; i < 4; i++)
+    relays[i].set(false, now);
+}
+
+// ----------------------------------------------------------
+// LOOP
+// ----------------------------------------------------------
+void loop()
+{
+  // Aktuelle Zeit nur einmal berechnen
+  now = millis();
+
+  // WLAN und MQTT-Stuff
+  if (connectWifiNonBlocking())
+  {
+    ArduinoOTA.handle();
+    if (connectMQTT())
+    {
+      mqttClient.loop();
+
+      if ((lastMqttStatusUpdate + MQTT_STATUS_INTERVAL) < now)
+        mqttSendStatus(true);
+    }
+  }
+
+  // MCPs auslesen und Handler ausführen
+  mcp.loop(now);
+
+  // handle changes at both motors
+  motorLeft.handle(now);
+  motorRight.handle(now);
+
+  // Alle Relais
+  for (uint8_t i = 0; i < 4; i++)
+    relays[i].loop(now);
+
+  if (gateRunning())
+  {
+    mcp.setOutputModus(LED_GATE_1, fastBlink);
+    mcp.setOutputModus(LED_GATE_2, reverseFastBlink);
+    relays[RELAY_0_GATE_MOTOR].set(true, now);
+
+    if (wantedTarget == open && state != opening)
+    {
+      state = opening;
+      mqttSendAdebarCarportGate(false);
+    }
+    else if (wantedTarget == close && state != closing)
+    {
+      state = closing;
+      mqttSendAdebarCarportGate(false);
+    }
+  }
+  else
+  {
+    mcp.setOutputModus(LED_GATE_1, off);
+    mcp.setOutputModus(LED_GATE_2, off);
+    relays[RELAY_0_GATE_MOTOR].set(false, now);
+
+    if (wantedTarget != state)
+    {
+      if (wantedTarget == open &&
+          motorLeft.isOpenPosition() &&
+          motorRight.isOpenPosition())
+      {
+        state = open;
+        mqttSendAdebarCarportGate(false);
+      }
+      else if (wantedTarget == close &&
+               motorLeft.isClosePosition() &&
+               motorRight.isClosePosition())
+      {
+        state = close;
+        mqttSendAdebarCarportGate(false);
+      }
+      else
+      {
+        wantedTarget = stop;
+        state = stop;
+        mqttSendAdebarCarportGate(false);
+      }
+    }
   }
 }

@@ -1,90 +1,152 @@
 #include "Motor.h"
 
-void Motor::begin(uint8_t motorPinOpen, uint8_t motorPinClose, MCP3008 *adc, uint8_t adcSpeedChannel, uint8_t adcHallChannel, uint32_t openAt, unsigned long startDelay)
+Motor *Motor::leftInstance = nullptr;
+Motor *Motor::rightInstance = nullptr;
+
+void IRAM_ATTR Motor::isrLeft()
+{
+  if (leftInstance)
+  {
+    if (leftInstance->_targetOpening)
+      leftInstance->currentSteps++;
+    else
+      leftInstance->currentSteps--;
+  }
+}
+
+void IRAM_ATTR Motor::isrRight()
+{
+  if (rightInstance)
+  {
+    if (rightInstance->_targetOpening)
+      rightInstance->currentSteps++;
+    else
+      rightInstance->currentSteps--;
+  }
+}
+
+void Motor::begin(unsigned long now,
+                  uint8_t motorPinOpen, uint8_t motorPinClose,
+                  MCP23017Controller *mcp, uint8_t reedPin, uint8_t voltagePin,
+                  Adafruit_ADS1015 *ads, uint8_t adsChannel,
+                  uint32_t openAt)
 {
 
   // Einstellungen übernehmen
   _motorPinOpen = motorPinOpen;
   _motorPinClose = motorPinClose;
-  _adc = adc;
-  _adcSpeedChannel = adcSpeedChannel;
-  _adcHallChannel = adcHallChannel;
+  _mcp = mcp;
+  _reedPin = reedPin;
+  _voltagePin = voltagePin;
+  _ads = ads;
+  _adsChannel = adsChannel;
   _openAt = openAt;
-  _startDelay = startDelay;
 
   // Ausgabe-PINs konfigurieren
   pinMode(_motorPinOpen, OUTPUT);
   pinMode(_motorPinClose, OUTPUT);
 
   // Erstmal alle stoppen
-  doStop();
+  doStop(now);
+
+  resetSafetyCurrent();
 
   // Zum Starten öffnen wir Stück
-  _currentSteps = _openAt - STEP_TOLERANCE - STEP_TOLERANCE;
-  doOpen();
+  // currentSteps wird von einer ISR verändert; Schreibzugriffen im
+  // Hauptkontext müssen atomar erfolgen, daher Interrupts kurz sperren.
+  noInterrupts();
+  currentSteps = _openAt - STEP_TOLERANCE - STEP_TOLERANCE;
+  interrupts();
+  doOpen(now);
 }
 
-void Motor::handle(unsigned long currentMillis)
+void Motor::handle(unsigned long now)
 {
   // Wenn wir nicht laufen, brauchen wir auch nichts machen
   if (!_running)
     return;
 
   // Wenn sich die Spanung noch nicht aufgebaut hat, machen wir auch nichts
-  if (milliVoltage < MIN_VOLTAGE)
+  if (_mcp->digitalRead(_voltagePin) == LOW)
   {
     analogWrite(_motorPinOpen, SPEED_STOP);
     analogWrite(_motorPinClose, SPEED_STOP);
 
-    _runningStart = currentMillis; // Startzeitpunkt zurücksetzen
+    _runningStart = now; // Startzeitpunkt zurücksetzen
 
     return;
   }
 
   // Wenn letzter Stopp gerade erst war, warten wir kurz, um Induktivität abzubauen
-  if (_runningStop + STARTUP_CURRENT_TIME*2 + _startDelay > currentMillis)
+  if (_runningStop + FORCED_DOWNTIME > now)
   {
-    _runningStart = currentMillis; // Startzeitpunkt zurücksetzen
+    _runningStart = now; // Startzeitpunkt zurücksetzen
     return;
   }
 
-  handleStepCounting();
-  handleSpeedZone(currentMillis);
-  handleSafetyCurrent(currentMillis);
+  handleSpeedZone(now);
+  handleSafetyCurrent(now);
+
+  // --- Laufzeit-Timeout: Motor nie länger als MOTOR_MAX_RUN_MS laufen lassen
+  if (now - _runningStart >= MOTOR_MAX_RUN_MS)
+  {
+    Serial.println("Motor-Laufzeit überschritten: Stop");
+    doStop(now);
+    if (errorCallback)
+      errorCallback(0); // 0 als Indikator für Timeout
+    return;
+  }
+
+  // --- Reed-Prüfung: wenn beim Start von Endlage erwartet, dann muss der Reed
+  // spätestens bis zur Hälfte der Max-Laufzeit einmal an geschaltet
+  // worden sein (auf LOW gezogen). Andernfalls Fehler.
+  if (_expectReedCheck && !_reedSeen)
+  {
+    bool currentReed = _mcp->digitalRead(_reedPin);
+
+    if (currentReed == LOW)
+      _reedSeen = true;
+
+    if (now >= MOTOR_REED_DEADLINE_MS + _runningStart && !_reedSeen)
+    {
+      Serial.println("Reed-Mittelpunkts-Schalter nicht rechtzeitig erreicht: Stop");
+      doStop(now);
+      if (errorCallback)
+        errorCallback(1); // 1 als Indikator für Reed-Fehler
+      return;
+    }
+  }
 
   // Offen, also stoppen
-  if (_targetOpening && _currentSteps >= _openAt)
+  if (_targetOpening && currentSteps >= _openAt)
   {
-    Serial.print("_currentSteps");
-    Serial.println(_currentSteps);
-    doStop();
+    doStop(now);
 
     // Beim ersten Öffnen, war das nur ein kleines Stück. Wir schließen.
     if (_startup)
     {
       _startup = false;
-      _currentSteps = _closeAt + STEP_TOLERANCE + STEP_TOLERANCE;
-      doClose();
+
+      doCloseABit(now);
     }
   }
 }
 
-void Motor::doOpen()
+void Motor::doOpen(unsigned long now)
 {
   if (isOpenPosition())
     return;
 
-  Serial.print(_motorPinOpen);
-  Serial.println(" doOpen");
-
-  _avarageCurrent = CURRENT_ZERO;
-
   _targetOpening = true;
   _running = true;
-  _runningStart = millis();
+  _runningStart = now;
+
+  // Setup Reed / Laufzeit checks: only expect reed if we started from an end position
+  _expectReedCheck = isOpenPosition() || isClosePosition();
+  _reedSeen = false;
 }
 
-void Motor::doClose()
+void Motor::doClose(unsigned long now)
 {
 
   if (isClosePosition())
@@ -92,113 +154,139 @@ void Motor::doClose()
 
   _targetOpening = false;
   _running = true;
-  _runningStart = millis();
+  _runningStart = now;
 
-  _avarageCurrent = CURRENT_ZERO;
-
-  Serial.print(_motorPinOpen);
-  Serial.println(" doClose");
+  // Setup Reed / Laufzeit checks: only expect reed if we started from an end position
+  _expectReedCheck = isOpenPosition() || isClosePosition();
+  _reedSeen = false;
 }
 
-void Motor::doStop()
+void Motor::doStop(unsigned long now)
 {
-  Serial.print(_motorPinOpen);
-  Serial.println(" doStop");
-
   analogWrite(_motorPinOpen, SPEED_STOP);
   analogWrite(_motorPinClose, SPEED_STOP);
-  _avarageCurrent = CURRENT_ZERO;
+  resetSafetyCurrent();
+  _expectReedCheck = false;
   _running = false;
-  _runningStop = millis();
+  _runningStop = now;
+}
+
+void Motor::doCloseABit(unsigned long now)
+{
+  // Schließe vielleicht bis Anschlag
+  noInterrupts();
+  currentSteps = _closeAt + STEP_TOLERANCE + STEP_TOLERANCE;
+  interrupts();
+  doClose(now);
 }
 
 bool Motor::isOpenPosition()
 {
-  return _currentSteps >= _openAt - STEP_TOLERANCE;
+  return currentSteps >= _openAt - STEP_TOLERANCE;
 }
 
 bool Motor::isClosePosition()
 {
-  return _currentSteps <= _closeAt + STEP_TOLERANCE;
+  return currentSteps <= _closeAt + STEP_TOLERANCE;
 }
 
-void Motor::handleSpeedZone(unsigned long currentMillis)
+void Motor::handleSpeedZone(unsigned long now)
 {
-  int stepsToTarget = _targetOpening ? (_openAt - _currentSteps) : (_currentSteps - _closeAt);
-  uint8_t speed = (stepsToTarget <= 100) ? SPEED_SOFT : SPEED_FULL;
+  uint8_t speed = SPEED_FULL;
 
-  unsigned long millisSinceStart = (currentMillis - _runningStart);
-  if (millisSinceStart < 256 * 7)
-    speed = millisSinceStart / 7;
+  unsigned long millisSinceStart = (now - _runningStart);
+  if (millisSinceStart < STARTUP_TIME)
+  {
+    float x = (float)millisSinceStart / (float)STARTUP_TIME; // 0.0 ... 1.0
+    float s = x * x * x * (x * (x * 6 - 15) + 10);           // smootherstep
+    speed = (s * SPEED_FULL);
+  }
 
   analogWrite(_motorPinOpen, _targetOpening ? speed : 0);
   analogWrite(_motorPinClose, !_targetOpening ? speed : 0);
 }
 
-void Motor::handleSafetyCurrent(unsigned long currentMillis)
+void Motor::handleSafetyCurrent(unsigned long now)
 {
-  const uint32_t rawCurrent = _adc->analogRead(_adcHallChannel);
-  _avarageCurrent = (10 * _avarageCurrent + rawCurrent) / 11;
+  // Lese aktuellen Rohwert
+  const int16_t rawCurrent = _ads->readADC_SingleEnded(_adsChannel);
+  
+  boolean closed = !_targetOpening && currentSteps < (_closeAt + STEP_TOLERANCE);
 
-  uint32_t realMilliCurrent;
-  if (_avarageCurrent < CURRENT_ZERO)
-    realMilliCurrent = (CURRENT_ZERO - _avarageCurrent) * 1000 / CURRENT_REAL_FACTOR;
-  else
-    realMilliCurrent = (_avarageCurrent - CURRENT_ZERO) * 1000 / CURRENT_REAL_FACTOR;
+  // Aktualisiere Ringpuffer und laufende Summe
+  _currentSum -= _currentSamples[_currentSampleIndex];
+  _currentSamples[_currentSampleIndex] = rawCurrent;
+  _currentSum += rawCurrent;
+  _currentSampleIndex = (_currentSampleIndex + 1) % SAFETY_CURRENT_WINDOW;
 
-  uint32_t milliWatt = realMilliCurrent * milliVoltage / 1000;
+  int32_t avg = _currentSum / SAFETY_CURRENT_WINDOW;
 
-  boolean closed = !_targetOpening && _currentSteps < (_closeAt + STEP_TOLERANCE);
-
-  // Serial.printf("volt: %06d   watt: %06d  current: %05d, orig: %05d\n", milliVoltage, milliWatt, realMilliCurrent, _avarageCurrent);
-
-  // Wenn Wert zu hoch, ist er irgendwo gegen gefahren
-  uint32_t threshold;
-
+  // Bestimme Schwellenwert (gleich wie vorher, abhängig von Startphase / Endlage)
+  int32_t threshold;
   if (closed)
-    threshold = POWER_THRESHOLD_END;
+    threshold = CURRENT_END_ERROR;
   else
-    threshold = _runningStart + STARTUP_CURRENT_TIME > currentMillis ? POWER_THRESHOLD_STARTUP : POWER_THRESHOLD;
+    threshold = _runningStart + STARTUP_TIME * 2.5 > now ? CURRENT_RUN_ERROR * 2 : CURRENT_RUN_ERROR;
 
-  if (milliWatt > threshold)
+  // Bedingungen: a) aktueller Messwert ist dauerhaft (> SAFETY_SUSTAIN_MS) über threshold
+  //              b) oder der Durchschnitt der letzten N Werte liegt über threshold
+  bool triggerByAvg = (avg > threshold);
+  bool triggerBySustain = false;
+
+  if (rawCurrent > threshold)
   {
-    doStop();
-    Serial.print("watt: ");
-    Serial.println(milliWatt);
-    Serial.println(threshold);
+    if (_overThresholdSince == 0)
+      _overThresholdSince = now;
+    else if (now - _overThresholdSince >= SAFETY_SUSTAIN_MS)
+      triggerBySustain = true;
+  }
+  else
+  {
+    _overThresholdSince = 0;
+  }
+
+  if (triggerByAvg || triggerBySustain)
+  {
+
+    doStop(now);
+    
+    // Beim ersten Öffnen irgendwo gegen gefahren (vielleicht schon ganz offen gewesen), war das nur ein kleines Stück. Wir schließen.
+    if (_targetOpening && _startup)
+    {
+      _startup = false;
+
+      doCloseABit(now);
+    } 
 
     // Ist komplett geschlossen, also okay
-    if (closed)
+    else if (closed)
     {
-      Serial.print("geschlossen bei: ");
-      Serial.print(_currentSteps);
-      _currentSteps = _closeAt;
-      Serial.print("ersetzt durch: ");
-      Serial.println(_currentSteps);
+      // Beim Erkennen als geschlossen: Stell den Zähler atomar auf die
+      // definierte Endlage.
+      noInterrupts();
+      currentSteps = _closeAt;
+      interrupts();
     }
     else
     {
-      errorCallback(milliWatt);
+      // Fehler-Callback mit Durchschnitt (oder roher Messung) aufrufen
+      if (errorCallback)
+        errorCallback((uint32_t)avg);
     }
+    // Sicherheits-Reset: verhindern, dass wir sofort wieder triggern
+    _overThresholdSince = 0;    
   }
 }
 
-// Zählen wenn eine Umdrehung gemacht wurde
-void Motor::handleStepCounting()
+void Motor::resetSafetyCurrent()
 {
-  uint32_t value = _adc->analogRead(_adcSpeedChannel);
-  if ((value > STEP_THRESHOLD) != _lastStepHigh)
+  // Initialisiere Ringpuffer für Stromüberwachung
+  _currentSum = 0;
+  for (uint8_t i = 0; i < SAFETY_CURRENT_WINDOW; i++)
   {
-    _lastStepHigh = !_lastStepHigh;
-
-    if (_targetOpening)
-      _currentSteps++;
-    else
-      _currentSteps--;
-
-    // Serial.print("Channel: ");
-    // Serial.print(_adcSpeedChannel);
-    // Serial.print(" Steps: ");
-    // Serial.println(_currentSteps);
+    _currentSamples[i] = CURRENT_ZERO;
+    _currentSum += CURRENT_ZERO;
   }
+  _currentSampleIndex = 0;
+  _overThresholdSince = 0;
 }
