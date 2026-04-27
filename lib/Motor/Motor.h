@@ -8,11 +8,11 @@
 #define STARTUP_TIME 500
 #define SAFETY_CURRENT_WINDOW 8
 #define SAFETY_SUSTAIN_MS 100
-#define CURRENT_ZERO 70   // ~ 0 Ampere
+#define CURRENT_ZERO 70       // ~ 0 Ampere
 #define CURRENT_END_ERROR 750 // ~ 0.5 Ampere
 #define CURRENT_RUN_ERROR 850 // ~ 0.5 Ampere
 
-#define MOTOR_MAX_RUN_MS 60000UL                     // Motor darf nie länger als 1 Minute laufen
+#define MOTOR_MAX_RUN_MS 60000UL                      // Motor darf nie länger als 1 Minute laufen
 #define MOTOR_REED_DEADLINE_MS (MOTOR_MAX_RUN_MS / 2) // Reed muss spätestens nach der Hälfte erreicht werden
 
 class Motor
@@ -32,7 +32,7 @@ private:
   // Wird von ISR gelesen — als volatile markieren, damit die ISR immer den
   // aktuellen Wert sieht.
   volatile bool _targetOpening = false;
-  
+
   // Start-Modus
   bool _startup = true;
 
@@ -67,6 +67,9 @@ private:
   // Zurücksetzen der Stromüberwachung
   void resetSafetyCurrent();
 
+  // MQTT Debug Nachricht senden
+  void mqttDebug(const char *message);
+
 public:
   // Aktuelle Umdrehungen
   volatile long currentSteps = 1100;
@@ -79,10 +82,10 @@ public:
 
   // Callback für Fehlerzustand
   void (*errorCallback)(uint32_t milliWatt);
+  bool (*mqttDebugCallback)(const char *message);
 
   // Läuft gerade
-  bool _running = false;
-
+  volatile bool _running = false;
 
   // Konstruktur mit allen Einstellungen
   void begin(unsigned long now,

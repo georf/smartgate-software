@@ -5,7 +5,7 @@ Motor *Motor::rightInstance = nullptr;
 
 void IRAM_ATTR Motor::isrLeft()
 {
-  if (leftInstance)
+  if (leftInstance && leftInstance->_running)
   {
     if (leftInstance->_targetOpening)
       leftInstance->currentSteps++;
@@ -16,7 +16,7 @@ void IRAM_ATTR Motor::isrLeft()
 
 void IRAM_ATTR Motor::isrRight()
 {
-  if (rightInstance)
+  if (rightInstance && rightInstance->_running)
   {
     if (rightInstance->_targetOpening)
       rightInstance->currentSteps++;
@@ -117,8 +117,13 @@ void Motor::handle(unsigned long now)
     }
   }
 
+  long currentStepsCopy;
+  noInterrupts();
+  currentStepsCopy = currentSteps;
+  interrupts();
+
   // Offen, also stoppen
-  if (_targetOpening && currentSteps >= _openAt)
+  if (_targetOpening && currentStepsCopy >= _openAt)
   {
     doStop(now);
 
@@ -182,12 +187,20 @@ void Motor::doCloseABit(unsigned long now)
 
 bool Motor::isOpenPosition()
 {
-  return currentSteps >= _openAt - STEP_TOLERANCE;
+  long currentStepsCopy;
+  noInterrupts();
+  currentStepsCopy = currentSteps;
+  interrupts();
+  return currentStepsCopy >= _openAt - STEP_TOLERANCE;
 }
 
 bool Motor::isClosePosition()
 {
-  return currentSteps <= _closeAt + STEP_TOLERANCE;
+  long currentStepsCopy;
+  noInterrupts();
+  currentStepsCopy = currentSteps;
+  interrupts();
+  return currentStepsCopy <= _closeAt + STEP_TOLERANCE;
 }
 
 void Motor::handleSpeedZone(unsigned long now)
@@ -210,8 +223,12 @@ void Motor::handleSafetyCurrent(unsigned long now)
 {
   // Lese aktuellen Rohwert
   const int16_t rawCurrent = _ads->readADC_SingleEnded(_adsChannel);
-  
-  boolean closed = !_targetOpening && currentSteps < (_closeAt + STEP_TOLERANCE);
+
+  long currentStepsCopy;
+  noInterrupts();
+  currentStepsCopy = currentSteps;
+  interrupts();
+  boolean closed = !_targetOpening && currentStepsCopy < (_closeAt + STEP_TOLERANCE + STEP_TOLERANCE);
 
   // Aktualisiere Ringpuffer und laufende Summe
   _currentSum -= _currentSamples[_currentSampleIndex];
@@ -256,7 +273,7 @@ void Motor::handleSafetyCurrent(unsigned long now)
       _startup = false;
 
       doCloseABit(now);
-    } 
+    }
 
     // Ist komplett geschlossen, also okay
     else if (closed)
@@ -272,9 +289,10 @@ void Motor::handleSafetyCurrent(unsigned long now)
       // Fehler-Callback mit Durchschnitt (oder roher Messung) aufrufen
       if (errorCallback)
         errorCallback((uint32_t)avg);
+      mqttDebug("safety current triggered");
     }
     // Sicherheits-Reset: verhindern, dass wir sofort wieder triggern
-    _overThresholdSince = 0;    
+    _overThresholdSince = 0;
   }
 }
 
@@ -289,4 +307,20 @@ void Motor::resetSafetyCurrent()
   }
   _currentSampleIndex = 0;
   _overThresholdSince = 0;
+}
+
+void Motor::mqttDebug(const char *message)
+{
+  if (mqttDebugCallback)
+  {
+    long currentStepsCopy;
+    noInterrupts();
+    currentStepsCopy = currentSteps;
+    interrupts();
+
+    char buffer[50];
+    _motorPinOpen == D6 ? snprintf(buffer, sizeof(buffer), "MotorL: %s, steps: %ld", message, currentStepsCopy)
+                        : snprintf(buffer, sizeof(buffer), "MotorR: %s, steps: %ld", message, currentStepsCopy);
+    mqttDebugCallback(buffer);
+  }
 }

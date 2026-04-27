@@ -71,7 +71,8 @@ WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 
 #define MAX_MQTT_BUFFER_ENTRIES 32
-struct mqttBuffer {
+struct mqttBuffer
+{
   char topic[56];
   char payload[64];
 };
@@ -82,7 +83,6 @@ unsigned long lastWifiReconnect = 0;
 unsigned long lastMqttReconnect = 0;
 unsigned long lastMqttStatusUpdate = 0;
 void mqttSendStatus(bool full);
-
 
 void mqttCallback(char *topic, byte *payload, unsigned int length)
 {
@@ -161,7 +161,8 @@ bool mqttPublish(const char *topic, const char *message)
   }
   else
   {
-    if (mqttSendBufferIndex < MAX_MQTT_BUFFER_ENTRIES) {
+    if (mqttSendBufferIndex < MAX_MQTT_BUFFER_ENTRIES)
+    {
       // Kopiere Nachricht in Buffer für späteres Senden
       strncpy(mqttSendBuffer[mqttSendBufferIndex].topic, topic, 56);
       strncpy(mqttSendBuffer[mqttSendBufferIndex].payload, message, 64);
@@ -284,9 +285,10 @@ bool connectMQTT()
     mqttClient.subscribe("adebar/carport/+/set");
     mqttClient.publish("adebar/carport/system/state", "connected");
     mqttSendStatus(true);
-    
+
     // Sende alle Nachrichten aus den Buffer
-    for(uint8_t i = 0; i < mqttSendBufferIndex; i++) {
+    for (uint8_t i = 0; i < mqttSendBufferIndex; i++)
+    {
       mqttClient.publish(mqttSendBuffer[i].topic, mqttSendBuffer[i].payload);
     }
     mqttSendBufferIndex = 0;
@@ -444,9 +446,11 @@ void setup()
 
   now = millis();
 
+  // Blickrichtung von Garage aus
   // Motor einrichtens
-  motorLeft.begin(now, MOTOR_LEFT_PWM_OPEN, MOTOR_LEFT_PWM_CLOSE, &mcp, SW_REED_LEFT, SW_24V, &ads, MOTOR_LEFT_CURRENT_CHANNEL, 4200);
+  motorLeft.begin(now, MOTOR_LEFT_PWM_OPEN, MOTOR_LEFT_PWM_CLOSE, &mcp, SW_REED_LEFT, SW_24V, &ads, MOTOR_LEFT_CURRENT_CHANNEL, 4360);
   motorLeft.errorCallback = &gateError;
+  motorLeft.mqttDebugCallback = &mqttDebug;
   Motor::leftInstance = &motorLeft;
   pinMode(MOTOR_LEFT_COUNT, INPUT_PULLUP);
   attachInterrupt(
@@ -454,8 +458,9 @@ void setup()
       Motor::isrLeft,
       FALLING);
 
-  motorRight.begin(now, MOTOR_RIGHT_PWM_OPEN, MOTOR_RIGHT_PWM_CLOSE, &mcp, SW_REED_RIGHT, SW_24V, &ads, MOTOR_RIGHT_CURRENT_CHANNEL, 3690);
+  motorRight.begin(now, MOTOR_RIGHT_PWM_OPEN, MOTOR_RIGHT_PWM_CLOSE, &mcp, SW_REED_RIGHT, SW_24V, &ads, MOTOR_RIGHT_CURRENT_CHANNEL, 3800);
   motorRight.errorCallback = &gateError;
+  motorRight.mqttDebugCallback = &mqttDebug;
   Motor::rightInstance = &motorRight;
   pinMode(MOTOR_RIGHT_COUNT, INPUT_PULLUP);
   attachInterrupt(
