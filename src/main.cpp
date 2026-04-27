@@ -446,9 +446,9 @@ void setup()
 
   now = millis();
 
-  // Blickrichtung von Garage aus
+  // Blickrichtung zur Garage hin
   // Motor einrichtens
-  motorLeft.begin(now, MOTOR_LEFT_PWM_OPEN, MOTOR_LEFT_PWM_CLOSE, &mcp, SW_REED_LEFT, SW_24V, &ads, MOTOR_LEFT_CURRENT_CHANNEL, 4360);
+  motorLeft.begin(now, MOTOR_LEFT_PWM_OPEN, MOTOR_LEFT_PWM_CLOSE, &mcp, SW_REED_LEFT, SW_24V, &ads, MOTOR_LEFT_CURRENT_CHANNEL, 4500);
   motorLeft.errorCallback = &gateError;
   motorLeft.mqttDebugCallback = &mqttDebug;
   Motor::leftInstance = &motorLeft;
@@ -458,7 +458,7 @@ void setup()
       Motor::isrLeft,
       FALLING);
 
-  motorRight.begin(now, MOTOR_RIGHT_PWM_OPEN, MOTOR_RIGHT_PWM_CLOSE, &mcp, SW_REED_RIGHT, SW_24V, &ads, MOTOR_RIGHT_CURRENT_CHANNEL, 3800);
+  motorRight.begin(now, MOTOR_RIGHT_PWM_OPEN, MOTOR_RIGHT_PWM_CLOSE, &mcp, SW_REED_RIGHT, SW_24V, &ads, MOTOR_RIGHT_CURRENT_CHANNEL, 3790);
   motorRight.errorCallback = &gateError;
   motorRight.mqttDebugCallback = &mqttDebug;
   Motor::rightInstance = &motorRight;
