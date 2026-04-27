@@ -78,7 +78,7 @@ void Motor::handle(unsigned long now)
   }
 
   // Wenn letzter Stopp gerade erst war, warten wir kurz, um Induktivität abzubauen
-  if (_runningStop + FORCED_DOWNTIME > now)
+  if (now - _runningStop < FORCED_DOWNTIME)
   {
     _runningStart = now; // Startzeitpunkt zurücksetzen
     return;
@@ -107,7 +107,7 @@ void Motor::handle(unsigned long now)
     if (currentReed == LOW)
       _reedSeen = true;
 
-    if (now >= MOTOR_REED_DEADLINE_MS + _runningStart && !_reedSeen)
+    if (now - _runningStart >= MOTOR_REED_DEADLINE_MS && !_reedSeen)
     {
       Serial.println("Reed-Mittelpunkts-Schalter nicht rechtzeitig erreicht: Stop");
       doStop(now);
@@ -243,7 +243,11 @@ void Motor::handleSafetyCurrent(unsigned long now)
   if (closed)
     threshold = CURRENT_END_ERROR;
   else
-    threshold = _runningStart + STARTUP_TIME * 2.5 > now ? CURRENT_RUN_ERROR * 2 : CURRENT_RUN_ERROR;
+  {
+    // Avoid floating point and addition that can overflow: use subtraction and integer math
+    unsigned long startupWindow = (STARTUP_TIME * 5UL) / 2UL; // STARTUP_TIME * 2.5
+    threshold = (now - _runningStart < startupWindow) ? (CURRENT_RUN_ERROR * 2) : CURRENT_RUN_ERROR;
+  }
 
   // Bedingungen: a) aktueller Messwert ist dauerhaft (> SAFETY_SUSTAIN_MS) über threshold
   //              b) oder der Durchschnitt der letzten N Werte liegt über threshold

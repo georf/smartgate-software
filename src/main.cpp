@@ -320,7 +320,7 @@ void clickLid()
 
 void gateToggle()
 {
-  if (now < lastToggle + MILLIS_BETWEEN_TOGGLE)
+  if (now - lastToggle < MILLIS_BETWEEN_TOGGLE)
     return;
 
   lastToggle = now;
@@ -500,7 +500,7 @@ void loop()
     {
       mqttClient.loop();
 
-      if ((lastMqttStatusUpdate + MQTT_STATUS_INTERVAL) < now)
+      if (now - lastMqttStatusUpdate >= MQTT_STATUS_INTERVAL)
         mqttSendStatus(true);
     }
   }
